@@ -13,7 +13,7 @@ via POSIX syscalls.
 - [x] GDT: null, kernel code/data (ring 0), user code/data (ring 3), TSS
 - [x] IDT: 256 vectors, load with `lidt`
 - [x] ISR dispatch: asm wrapper → `cpu_state_t` → C handler table
-- [ ] PIC 8259: remap master (0x20) / slave (0x28), mask all
+- [x] PIC 8259: remap master (0x20) / slave (0x28), mask all
 - [x] Exception stubs: #PF, #GP, #DE, #SS — log + halt
 
 ## Phase 2 — Memory management
