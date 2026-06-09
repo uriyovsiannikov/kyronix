@@ -18,9 +18,9 @@ via POSIX syscalls.
 
 ## Phase 2 — Memory management
 
-- [ ] PMM: bitmap + free-stack frame allocator
-- [ ] VMM: map/unmap, page alloc, higher-half takeover from Limine
-- [ ] Heap: `kmalloc`/`kfree` on top of page allocator
+- [x] PMM: bitmap + free-stack frame allocator
+- [x] VMM: map/unmap, page alloc, higher-half takeover from Limine
+- [x] Heap: `kmalloc`/`kfree` on top of page allocator
 
 ## Phase 3 — Timer
 

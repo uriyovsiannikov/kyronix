@@ -7,10 +7,13 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/pic.h"
+#include "arch/x86_64/pmm.h"
+#include "arch/x86_64/vmm.h"
 #include "drivers/serial.h"
 #include "drivers/fb.h"
 #include "lib/printf.h"
 #include "lib/string.h"
+#include "lib/heap.h"
 
 LIMINE_REQUESTS_START_MARKER;
 LIMINE_BASE_REVISION(3);
@@ -33,7 +36,16 @@ static volatile struct limine_hhdm_request hhdm_req = {
     .response = NULL,
 };
 
+static volatile struct limine_kernel_address_request kaddr_req = {
+    .id = LIMINE_KERNEL_ADDRESS_REQUEST,
+    .revision = 0,
+    .response = NULL,
+};
+
 LIMINE_REQUESTS_END_MARKER;
+
+extern uint64_t __kernel_start[];
+extern uint64_t __kernel_end[];
 
 static void kernel_putchar(char c, void *ctx) {
     (void)ctx;
@@ -57,12 +69,12 @@ static const char *memmap_type_name(uint64_t type) {
 
 static void print_banner(void) {
     fb_set_color(COLOR_CYAN, COLOR_BG);
-    kprintf("K  K  Y   Y  RRRR    OOO   N   N  III  X   X \n");
-    kprintf("K K    Y Y   R   R  O   O  NN  N   I    X X  \n");
-    kprintf("KK      Y    RRRR   O   O  N N N   I     X   \n");
-    kprintf("K K     Y    R R    O   O  N  NN   I    X X  \n");
-    kprintf("K  K    Y    R  RR   OOO   N   N  III  X   X \n");
-    kprintf("                                           \n");
+    kprintf("   K  K  Y   Y  RRRR    OOO   N   N  III  X   X \n");
+    kprintf("   K K    Y Y   R   R  O   O  NN  N   I    X X  \n");
+    kprintf("   KK      Y    RRRR   O   O  N N N   I     X   \n");
+    kprintf("   K K     Y    R R    O   O  N  NN   I    X X  \n");
+    kprintf("   K  K    Y    R  RR   OOO   N   N  III  X   X \n");
+    kprintf("===================================================\n");
     kprintf("                                           \n");
 
     fb_set_color(COLOR_WHITE, COLOR_BG);
@@ -91,7 +103,6 @@ static void print_memmap(void) {
     kprintf("  Usable: %lu MiB\n\n", total_usable / (1024 * 1024));
 }
 
-// kernel entry here
 
 void kmain(void) {
     gdt_init();
@@ -115,14 +126,42 @@ void kmain(void) {
 
     if (hhdm_req.response)
         kprintf("HHDM offset : 0x%016lx\n", hhdm_req.response->offset);
+    if (kaddr_req.response)
+        kprintf("Kernel phys : 0x%016lx  virt: 0x%016lx\n",
+                kaddr_req.response->physical_base,
+                kaddr_req.response->virtual_base);
 
     kprintf("Framebuffer : %lux%lu  %u bpp\n\n",
             lfb->width, lfb->height, (unsigned)lfb->bpp);
 
     print_memmap();
 
+    if (!hhdm_req.response || !mmap_req.response || !kaddr_req.response)
+        cpu_halt();
+
+    size_t kernel_size = (uint64_t)__kernel_end - (uint64_t)__kernel_start;
+    pmm_init(hhdm_req.response->offset,
+             mmap_req.response,
+             kaddr_req.response->physical_base, kernel_size);
+    vmm_init();
+    heap_init((uint64_t)__kernel_end);
+
+    void *a1 = kmalloc(64);
+    void *a2 = kmalloc(256);
+    void *a3 = kmalloc(4096);
+    kprintf("kmalloc(64)  = %p\n", a1);
+    kprintf("kmalloc(256) = %p\n", a2);
+    kprintf("kmalloc(4K)  = %p\n", a3);
+
+    kfree(a2);
+    void *a4 = kmalloc(128);
+    kprintf("kmalloc(128) after kfree = %p (reuses freed block)\n", a4);
+
+    kprintf("\nFree list:\n");
+    heap_print();
+
     fb_set_color(COLOR_GRAY, COLOR_BG);
-    kprintf("Kernel halted.\n");
+    kprintf("\nKernel halted.\n");
 
     cpu_halt();
 }
