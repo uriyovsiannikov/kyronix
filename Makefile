@@ -46,9 +46,11 @@ LDFLAGS := \
     -static            \
     -z max-page-size=0x1000
 
-SRCS := $(shell find $(SRC_DIR) -name '*.c')
-OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
-DEPS := $(OBJS:.o=.d)
+SRCS    := $(shell find $(SRC_DIR) -name '*.c')
+ASM_SRCS:= $(shell find $(SRC_DIR) -name '*.S')
+OBJS    := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+OBJS    += $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRCS))
+DEPS    := $(filter %.d,$(OBJS:.o=.d))
 
 QEMU_FLAGS := -M q35 -m 2G -cdrom $(ISO) -boot d -serial stdio -no-reboot -no-shutdown
 
@@ -62,6 +64,11 @@ $(BUILD_DIR)/$(TARGET): $(OBJS)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.S
+	mkdir -p $(@D)
+	$(CC) -std=c11 $(OPT) -ffreestanding -fno-pic -fno-pie -m64 -march=x86-64 \
+	      -Ikernel -Ikernel/boot -c $< -o $@
 
 -include $(DEPS)
 

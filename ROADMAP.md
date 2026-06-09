@@ -11,10 +11,10 @@ via POSIX syscalls.
 ## Phase 1 — Segments & interrupts
 
 - [x] GDT: null, kernel code/data (ring 0), user code/data (ring 3), TSS
-- [ ] IDT: 256 vectors, load with `lidt`
-- [ ] ISR dispatch: asm wrapper → `cpu_state_t` → C handler table
+- [x] IDT: 256 vectors, load with `lidt`
+- [x] ISR dispatch: asm wrapper → `cpu_state_t` → C handler table
 - [ ] PIC 8259: remap master (0x20) / slave (0x28), mask all
-- [ ] Exception stubs: #PF, #GP, #DE, #SS — log + halt
+- [x] Exception stubs: #PF, #GP, #DE, #SS — log + halt
 
 ## Phase 2 — Memory management
 

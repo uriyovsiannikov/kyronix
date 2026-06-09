@@ -5,6 +5,7 @@
 #include "boot/limine.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
 #include "drivers/serial.h"
 #include "drivers/fb.h"
 #include "lib/printf.h"
@@ -93,6 +94,7 @@ static void print_memmap(void) {
 
 void kmain(void) {
     gdt_init();
+    idt_init();
     serial_init(COM1);
     printf_set_putchar(kernel_putchar, NULL);
 
