@@ -32,7 +32,8 @@ typedef struct proc {
     uint64_t     brk;           /* 64 */
     uint64_t     brk_base;      /* 72 */
     uint64_t     mmap_bump;     /* 80 */
-    vfs_file_t **fds;           /* 88 */
+    uint64_t     fs_base;       /* 88 */
+    vfs_file_t **fds;           /* 96 */
     uint64_t     pending_sigs;  /* 96  — bit k-1 = signal k pending */
     uint64_t     sig_mask;      /* 104 */
     k_sigaction_t sig_actions[NSIG]; /* 112 — per-signal handler/flags/restorer */

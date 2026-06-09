@@ -3,11 +3,15 @@
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "lib/printf.h"
+#include "lib/log.h"
 #include "drivers/serial.h"
+#include "drivers/tty.h"
 #include "arch/x86_64/cpu.h"
 
 static vfs_node_t  *g_root     = NULL;
 static uint32_t     g_next_ino = 1;
+
+char g_cwd[512] = "/";
 
 static vfs_file_t  *g_default_fds[VFS_FD_MAX];
 static vfs_file_t **g_fds = g_default_fds;
@@ -40,7 +44,18 @@ static vfs_node_t *lookup_internal(const char *path, bool follow_last, int depth
     if (!path || path[0] == '\0') return NULL;
     if (depth > 32) return NULL;
 
-    vfs_node_t *cur = (path[0] == '/') ? g_root : NULL;
+    vfs_node_t *cur;
+    if (path[0] == '/') {
+        cur = g_root;
+    } else {
+        size_t cwd_len = strlen(g_cwd);
+        char full[512];
+        if (cwd_len + 1 + strlen(path) >= sizeof(full)) return NULL;
+        memcpy(full, g_cwd, cwd_len);
+        if (full[cwd_len - 1] != '/') full[cwd_len++] = '/';
+        strcpy(full + cwd_len, path);
+        return lookup_internal(full, follow_last, depth + 1);
+    }
     if (!cur) return NULL;
 
     const char *p = path;
@@ -205,31 +220,11 @@ static int64_t dev_zero_read(vfs_node_t *n, char *buf, uint64_t len, uint64_t of
 }
 static int64_t dev_tty_read(vfs_node_t *n, char *buf, uint64_t len, uint64_t off) {
     (void)n; (void)off;
-    if (!len) return 0;
-
-    /* block until at least one byte arrives, yielding to any ready process, */
-    while (!serial_data_ready(COM1)) {
-        sched_yield_blocking();
-        cpu_relax();
-    }
-
-    uint64_t i = 0;
-    while (i < len && serial_data_ready(COM1)) {
-        uint8_t c = serial_getchar(COM1);
-        if (c == '\r') c = '\n';         /* CR -> LF (Enter key on most terminals) */
-        if (c == 0x04) {                 /* Ctrl+D -> EOF (return whatever we have) */
-            if (i == 0) return 0;
-            break;
-        }
-        buf[i++] = (char)c;
-    }
-    return (int64_t)i;
+    return tty_read(buf, len);
 }
 static int64_t dev_tty_write(vfs_node_t *n, const char *buf, uint64_t len) {
     (void)n;
-    for (uint64_t i = 0; i < len; i++)
-        serial_putchar(COM1, buf[i]);
-    return (int64_t)len;
+    return tty_write(buf, len);
 }
 
 static int fd_alloc_from(int start) {
@@ -333,7 +328,7 @@ void vfs_init(void) {
     vfs_create_symlink("/dev/fd", "/proc/self/fd");
 
     wire_stdio(g_default_fds);
-    kprintf("VFS:  root mounted  (ramfs)\n");
+    log_info("VFS:  root mounted  (ramfs)");
 }
 
 static void fill_stat(vfs_node_t *n, struct linux_stat *st) {
@@ -533,6 +528,28 @@ int fd_fstat(int fd, struct linux_stat *st) {
         return 0;
     }
     fill_stat(f->node, st);
+    return 0;
+}
+
+int fd_fstatat(int dirfd, const char *path, struct linux_stat *st, int flags) {
+    if (!path || !st) return -(int)EINVAL;
+    if (path[0] == '\0' && (flags & AT_EMPTY_PATH))
+        return fd_fstat(dirfd, st);
+    if (path[0] == '/' || dirfd == AT_FDCWD) {
+        vfs_node_t *n = (flags & AT_SYMLINK_NOFOLLOW)
+                            ? vfs_lookup_nofollow(path)
+                            : vfs_lookup(path);
+        if (!n) return -(int)ENOENT;
+        fill_stat(n, st);
+        return 0;
+    }
+    vfs_file_t *df = fd_get(dirfd);
+    if (!df || !df->node || df->node->type != VFS_TYPE_DIR) return -(int)EBADF;
+    vfs_node_t *n = (flags & AT_SYMLINK_NOFOLLOW)
+                        ? vfs_lookup_nofollow(path)
+                        : vfs_lookup(path);
+    if (!n) return -(int)ENOENT;
+    fill_stat(n, st);
     return 0;
 }
 

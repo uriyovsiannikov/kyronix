@@ -1,7 +1,7 @@
 #include "cpio.h"
 #include "vfs.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "mm/heap.h"
 
 static uint32_t hex8(const char *s) {
@@ -54,7 +54,7 @@ int cpio_load(const void *data, uint64_t total_size) {
         if (hdr->magic[0] != '0' || hdr->magic[1] != '7' ||
             hdr->magic[2] != '0' || hdr->magic[3] != '7' ||
             hdr->magic[4] != '0' || (hdr->magic[5] != '1' && hdr->magic[5] != '2')) {
-            kprintf("CPIO: bad magic at offset %lu\n", pos);
+            log_error("CPIO: bad magic at offset %lu", pos);
             return -1;
         }
 
@@ -116,6 +116,6 @@ next:
         pos = next_pos;
     }
 
-    kprintf("CPIO: loaded %d files into ramfs\n", count);
+    log_info("CPIO: loaded %d files into ramfs", count);
     return 0;
 }

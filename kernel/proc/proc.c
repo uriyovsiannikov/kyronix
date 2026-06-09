@@ -2,7 +2,7 @@
 #include "mm/pmm.h"
 #include "mm/heap.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "syscall/syscall.h"   /* g_current_space */
 
@@ -11,7 +11,7 @@ proc_t *g_current_proc = NULL;
 
 void proc_init(void) {
     memset(g_proctable, 0, sizeof(g_proctable));
-    kprintf("PROC: table initialised  (%d slots)\n", PROC_MAX);
+    log_info("PROC: table initialised  (%d slots)", PROC_MAX);
 }
 
 proc_t *proc_alloc(uint32_t ppid) {

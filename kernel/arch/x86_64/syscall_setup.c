@@ -1,7 +1,7 @@
 #include "syscall_setup.h"
 #include "cpu.h"
 #include "gdt.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 
 #define MSR_EFER          0xC0000080
 #define MSR_STAR          0xC0000081
@@ -46,7 +46,7 @@ void syscall_init(void) {
     wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)&g_cpu_local);
     gdt_set_kernel_stack(rsp0);
 
-    kprintf("SYSCALL: LSTAR=0x%016lx  stack=0x%016lx\n",
+    log_info("SYSCALL: LSTAR=0x%016lx  stack=0x%016lx",
             (uint64_t)syscall_entry, rsp0);
 }
 

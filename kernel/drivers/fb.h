@@ -7,14 +7,14 @@
 #define RGB(r, g, b) ((uint32_t)(((r) << 16) | ((g) << 8) | (b)))
 
 #define COLOR_BLACK   RGB(  0,   0,   0)
-#define COLOR_WHITE   RGB(255, 255, 255)
-#define COLOR_RED     RGB(220,  50,  47)
-#define COLOR_GREEN   RGB( 42, 161, 152)
-#define COLOR_BLUE    RGB( 38, 139, 210)
-#define COLOR_YELLOW  RGB(181, 137,   0)
-#define COLOR_CYAN    RGB(  0, 210, 210)
-#define COLOR_GRAY    RGB( 88,  88, 100)
-#define COLOR_BG      RGB( 10,  10,  20)
+#define COLOR_WHITE   RGB(212, 212, 220)
+#define COLOR_RED     RGB(224, 108, 117)
+#define COLOR_GREEN   RGB(152, 195, 121)
+#define COLOR_BLUE    RGB( 97, 175, 239)
+#define COLOR_YELLOW  RGB(229, 192, 123)
+#define COLOR_CYAN    RGB( 86, 182, 194)
+#define COLOR_GRAY    RGB(145, 145, 155)
+#define COLOR_BG      RGB( 14,  14,  16)
 
 typedef struct {
     void    *addr;

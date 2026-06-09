@@ -4,7 +4,7 @@
 #include "mm/vmm.h"
 #include "mm/heap.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "fs/vfs.h"
 #include "proc/proc.h"
@@ -89,7 +89,7 @@ uint64_t setup_user_stack(vmm_space_t *space,
     *p++ = 0;
     memcpy(p, auxv, sizeof(auxv));
 
-    kprintf("Stack: RSP=0x%lx  argc=%d  argv0=%s\n", sp, argc,
+    log_info("Stack: RSP=0x%lx  argc=%d  argv0=%s", sp, argc,
             (argc > 0 && argv && argv[0]) ? argv[0] : "(null)");
     return sp;
 }
@@ -97,7 +97,7 @@ uint64_t setup_user_stack(vmm_space_t *space,
 int process_exec(const void *data, uint64_t size, const char *name) {
     elf_load_result_t res;
     if (elf_load(data, size, &res) < 0) {
-        kprintf("process_exec: elf_load failed\n");
+        log_error("process_exec: elf_load failed");
         return -1;
     }
 
@@ -112,14 +112,14 @@ int process_exec(const void *data, uint64_t size, const char *name) {
     uint64_t rsp = setup_user_stack(res.space, &res, 1,
                                      init_argv, init_envp);
     if (!rsp) {
-        kprintf("process_exec: stack setup failed\n");
+        log_error("process_exec: stack setup failed");
         vmm_space_free(res.space);
         return -1;
     }
 
     proc_t *p = proc_alloc(0);
     if (!p) {
-        kprintf("process_exec: proc_alloc failed\n");
+        log_error("process_exec: proc_alloc failed");
         vmm_space_free(res.space);
         return -1;
     }

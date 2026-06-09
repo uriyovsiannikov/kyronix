@@ -4,6 +4,7 @@
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "lib/printf.h"
+#include "lib/log.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "fs/vfs.h"
@@ -117,6 +118,7 @@ static int64_t sys_fork(syscall_frame_t *f) {
     child->sig_mask     = parent->sig_mask;
     memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
     child->pending_sigs = 0;
+    child->fs_base      = parent->fs_base;
 
     uint8_t *ksp = child->kstack + KSTACK_SIZE;
 
@@ -134,7 +136,7 @@ static int64_t sys_fork(syscall_frame_t *f) {
     child->kstack_rsp = (uint64_t)ksp;
     child->state = PROC_READY;
 
-    kprintf("[fork] parent=%u child=%u\n", parent->pid, child->pid);
+    log_info("[fork] parent=%u child=%u", parent->pid, child->pid);
     return (int64_t)child->pid;
 
 fail_fork:
@@ -237,14 +239,14 @@ static int64_t sys_execve(const char *path, const char **uargv, const char **uen
         }
     }
 
-    kprintf("[exec] pid=%u entry=0x%lx rsp=0x%lx\n",
+    log_info("[exec] pid=%u entry=0x%lx rsp=0x%lx",
             p->pid, res.entry, rsp);
     enter_userspace_exec(res.entry, rsp, 0x202ULL);
 }
 
 __attribute__((noreturn)) void proc_do_exit(int code) {
     proc_t *p = cur();
-    kprintf("[pid %u] exit(%d)\n", p->pid, code);
+    log_info("[pid %u] exit(%d)", p->pid, code);
     vfs_free_fdtable(p->fds);
     p->fds = NULL;
 
@@ -322,9 +324,9 @@ static int64_t sys_wait4(int pid, int *wstatus, int options, void *rusage) {
 
 static int64_t sys_arch_prctl(int code, uint64_t addr) {
     switch (code) {
-        case ARCH_SET_FS: wrmsr(0xC0000100, addr); return 0;
+        case ARCH_SET_FS: wrmsr(0xC0000100, addr); cur()->fs_base = addr; return 0;
         case ARCH_SET_GS: wrmsr(0xC0000101, addr); return 0;
-        case ARCH_GET_FS: return (int64_t)rdmsr(0xC0000100);
+        case ARCH_GET_FS: return (int64_t)cur()->fs_base;
         case ARCH_GET_GS: return (int64_t)rdmsr(0xC0000101);
     }
     return -(int64_t)EINVAL;
@@ -337,15 +339,13 @@ struct utsname {
 static int64_t sys_uname(struct utsname *buf) {
     if (!buf) return -(int64_t)EFAULT;
     memset(buf, 0, sizeof(*buf));
-    memcpy(buf->sysname,  "Linux",   5);
-    memcpy(buf->nodename, "kyronix", 7);
-    memcpy(buf->release,  "6.1.0",   5);
+    memcpy(buf->sysname,  "Kyronix",   7);
+    memcpy(buf->nodename, "localhost", 9);
+    memcpy(buf->release,  "0.0.1",   5);
     memcpy(buf->version,  "#1 SMP",  6);
     memcpy(buf->machine,  "x86_64",  6);
     return 0;
 }
-
-static char g_cwd[512] = "/";
 
 static int64_t sys_getcwd(char *buf, uint64_t size) {
     if (!buf || !size) return -(int64_t)EINVAL;
@@ -696,6 +696,7 @@ void syscall_dispatch(syscall_frame_t *f) {
         case 231: proc_do_exit((int)a1); return;
         case 234: ret = sys_tgkill((int)a1, (int)a2, (int)a3);               break;
         case 257: ret = fd_openat ((int)a1,(const char*)a2,(int)a3,(int)a4);  break;
+        case 262: ret = fd_fstatat((int)a1,(const char*)a2,(struct linux_stat*)a3,(int)a4); break;
         case 270: ret = sys_pselect6((int)a1,(void*)a2,(void*)a3,
                                      (void*)a4,(void*)a5,(void*)a6);          break;
         case 271: ret = sys_ppoll  ((struct pollfd_s*)a1,a2,
@@ -707,7 +708,7 @@ void syscall_dispatch(syscall_frame_t *f) {
         case 318: ret = sys_getrandom((void*)a1, a2, (uint32_t)a3);           break;
 
         default:
-            kprintf("[syscall %lu  a1=%lx a2=%lx a3=%lx]\n", nr, a1, a2, a3);
+            log_debug("[syscall %lu  a1=%lx a2=%lx a3=%lx]", nr, a1, a2, a3);
             ret = -(int64_t)ENOSYS;
             break;
     }

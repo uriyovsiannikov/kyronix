@@ -11,8 +11,11 @@
 #include "mm/vmm.h"
 #include "mm/heap.h"
 #include "drivers/serial.h"
+#include "drivers/kbd.h"
 #include "drivers/fb.h"
+#include "drivers/tty.h"
 #include "lib/printf.h"
+#include "lib/log.h"
 #include "lib/string.h"
 #include "exec/process.h"
 #include "fs/vfs.h"
@@ -52,8 +55,7 @@ LIMINE_REQUESTS_END_MARKER;
 
 static void kernel_putchar(char c, void *ctx) {
     (void)ctx;
-    serial_putchar(COM1, c);
-    if (g_fb.addr) fb_putchar(c);
+    tty_putchar(c);
 }
 
 static const char *memmap_type_name(uint64_t type) {
@@ -70,40 +72,43 @@ static const char *memmap_type_name(uint64_t type) {
     }
 }
 
-static void print_banner(void) {
-    fb_set_color(COLOR_CYAN, COLOR_BG);
-    kprintf("   K  K  Y   Y  RRRR    OOO   N   N  III  X   X \n");
-    kprintf("   K K    Y Y   R   R  O   O  NN  N   I    X X  \n");
-    kprintf("   KK      Y    RRRR   O   O  N N N   I     X   \n");
-    kprintf("   K K     Y    R R    O   O  N  NN   I    X X  \n");
-    kprintf("   K  K    Y    R  RR   OOO   N   N  III  X   X \n");
-    kprintf("===================================================\n");
-    kprintf("                                           \n");
+static void print_system_info(struct limine_framebuffer *lfb) {
+    if (!mmap_req.response) return;
 
+    uint64_t usable = 0;
+    for (uint64_t i = 0; i < mmap_req.response->entry_count; i++) {
+        struct limine_memmap_entry *e = mmap_req.response->entries[i];
+        if (e->type == LIMINE_MEMMAP_USABLE)
+            usable += e->length;
+    }
+
+    fb_set_color(COLOR_GRAY, COLOR_BG);
+    kprintf("  Memory:  %lu MiB usable\n", usable >> 20);
+    kprintf("  Video:   %lux%lu  %u bpp\n",
+            lfb->width, lfb->height, (unsigned)lfb->bpp);
     fb_set_color(COLOR_WHITE, COLOR_BG);
+    kprintf("\n");
 }
 
 static void print_memmap(void) {
     if (!mmap_req.response) {
-        kprintf("[warn] no memory map\n");
+        log_warn("no memory map");
         return;
     }
     struct limine_memmap_response *resp = mmap_req.response;
     uint64_t total_usable = 0;
 
-    fb_set_color(COLOR_YELLOW, COLOR_BG);
-    kprintf("Memory map (%lu entries):\n", resp->entry_count);
-    fb_set_color(COLOR_WHITE, COLOR_BG);
+    log_info("Memory map (%lu entries):", resp->entry_count);
 
     for (uint64_t i = 0; i < resp->entry_count; i++) {
         struct limine_memmap_entry *e = resp->entries[i];
-        kprintf("  %016lx-%016lx  %s\n",
+        log_info("  %016lx-%016lx  %s",
                 e->base, e->base + e->length,
                 memmap_type_name(e->type));
         if (e->type == LIMINE_MEMMAP_USABLE)
             total_usable += e->length;
     }
-    kprintf("  Usable: %lu MiB\n\n", total_usable / (1024 * 1024));
+    log_info("  Usable: %lu MiB", total_usable / (1024 * 1024));
 }
 
 void kmain(void) {
@@ -112,6 +117,7 @@ void kmain(void) {
 
     gdt_init();
     idt_init();
+    kbd_init();
 
     if (!mmap_req.response || !hhdm_req.response) {
         kprintf("FATAL: no memory map or HHDM from bootloader\n");
@@ -131,7 +137,7 @@ void kmain(void) {
     fb_init(lfb);
     fb_clear(COLOR_BG);
 
-    print_banner();
+    // print_system_info(lfb);
 
     {
         void *p[4];
@@ -149,9 +155,7 @@ void kmain(void) {
 
         for (int i = 0; i < 4; i++) if (p[i]) pmm_free(p[i]);
 
-        fb_set_color(pmm_ok ? COLOR_GREEN : COLOR_RED, COLOR_BG);
-        kprintf("pmm test : %s\n", pmm_ok ? "PASS" : "FAIL");
-        fb_set_color(COLOR_WHITE, COLOR_BG);
+        log_info("pmm test : %s", pmm_ok ? "PASS" : "FAIL");
     }
 
     {
@@ -170,9 +174,7 @@ void kmain(void) {
             pmm_free((void *)test_phys);
         }
 
-        fb_set_color(vmm_ok ? COLOR_GREEN : COLOR_RED, COLOR_BG);
-        kprintf("vmm test : %s\n", vmm_ok ? "PASS" : "FAIL");
-        fb_set_color(COLOR_WHITE, COLOR_BG);
+        log_info("vmm test : %s", vmm_ok ? "PASS" : "FAIL");
     }
 
     {
@@ -210,27 +212,25 @@ void kmain(void) {
         kfree(c);
         kfree(d);
 
-        fb_set_color(heap_ok ? COLOR_GREEN : COLOR_RED, COLOR_BG);
-        kprintf("heap test: %s\n", heap_ok ? "PASS" : "FAIL");
-        fb_set_color(COLOR_WHITE, COLOR_BG);
+        log_info("heap test: %s", heap_ok ? "PASS" : "FAIL");
         heap_stats();
     }
-    
-    if (hhdm_req.response)
-        kprintf("hhdm offset : 0x%016lx\n", hhdm_req.response->offset);
 
-    kprintf("fb : %lux%lu  %u bpp\n\n",
+    if (hhdm_req.response)
+        log_info("hhdm offset : 0x%016lx", hhdm_req.response->offset);
+
+    log_info("fb : %lux%lu  %u bpp",
             lfb->width, lfb->height, (unsigned)lfb->bpp);
 
     print_memmap();
 
     if (mod_req.response && mod_req.response->module_count > 0) {
         struct limine_file *initrd = mod_req.response->modules[0];
-        kprintf("initrd: %s  (%lu bytes)\n", initrd->path, initrd->size);
+        log_info("initrd: %s  (%lu bytes)", initrd->path, initrd->size);
         if (cpio_load(initrd->address, initrd->size) < 0)
-            kprintf("[warn] initrd parse failed\n");
+            log_warn("initrd parse failed");
     } else {
-        kprintf("[warn] no initrd module\n");
+        log_warn("no initrd module");
     }
 
     {
@@ -241,18 +241,14 @@ void kmain(void) {
             init_node = vfs_lookup("/bin/init");
 
         if (init_node && init_node->type == VFS_TYPE_REG && init_node->data) {
-            kprintf("Launching /init  (%lu bytes)\n", init_node->size);
-            fb_set_color(COLOR_CYAN, COLOR_BG);
-            kprintf("Entering ring 3...\n");
-            fb_set_color(COLOR_WHITE, COLOR_BG);
             if (process_exec(init_node->data, init_node->size, "/init") < 0)
-                kprintf("FATAL: process_exec failed\n");
+                kprintf("  FATAL: process_exec failed\n");
         } else {
-            kprintf("FATAL: /init not found in initrd\n");
+            kprintf("  FATAL: /init not found in initrd\n");
         }
     }
 
     fb_set_color(COLOR_GRAY, COLOR_BG);
-    kprintf("Kernel halted.\n");
+    kprintf("  Kernel halted.\n");
     cpu_halt();
 }

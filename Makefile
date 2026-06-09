@@ -54,9 +54,12 @@ SRCS := \
     kernel/fs/pipe.c                   \
     kernel/fs/cpio.c                   \
     kernel/drivers/serial.c           \
+    kernel/drivers/kbd.c              \
+    kernel/drivers/tty.c              \
     kernel/drivers/fb.c               \
     kernel/lib/string.c               \
-    kernel/lib/printf.c
+    kernel/lib/printf.c                \
+    kernel/lib/log.c
 
 ASM_SRCS := \
     kernel/arch/x86_64/idt_stubs.S    \
@@ -68,11 +71,12 @@ DEPS := $(OBJS:.o=.d)
 
 INIT_BIN := build/bin/kyronix-init
 KSHELL   := build/bin/ksh
+SBASE_BIN := build/bin/sbase-tools.stamp
 INITRD   := initrd.cpio
 
 .PHONY: all iso run run-serial run-uefi clean
 
-all: $(TARGET) $(INIT_BIN) $(KSHELL)
+all: $(TARGET) $(INIT_BIN) $(KSHELL) $(SBASE_BIN)
 
 $(INIT_BIN):
 	$(MAKE) -C user/init_
@@ -80,12 +84,23 @@ $(INIT_BIN):
 $(KSHELL):
 	$(MAKE) -C user/shell
 
-$(INITRD): $(INIT_BIN) $(KSHELL)
+$(SBASE_BIN):
+	$(MAKE) -C user/sbase -f Makefile.kyronix
+	$(MAKE) -C user/fetch
+	touch $@
+
+$(INITRD): $(INIT_BIN) $(KSHELL) $(SBASE_BIN)
 	@rm -rf initrd_staging
 	@mkdir -p initrd_staging/etc initrd_staging/bin
 	@cp $(INIT_BIN) initrd_staging/init
 	@cp $(KSHELL) initrd_staging/bin/ksh
 	@printf "KyronixOS 0.0.1\n" > initrd_staging/etc/kyronix-release
+	@for f in build/bin/*; do \
+	    case "$$(basename $$f)" in \
+	        kyronix-init|ksh|sbase-tools.stamp) ;; \
+	        *) cp $$f initrd_staging/bin/ ;; \
+	    esac \
+	done
 	@cd initrd_staging && find . | sort | cpio -o --format=newc > ../$(INITRD) 2>/dev/null
 	@rm -rf initrd_staging
 	@echo "  Built: $(INITRD)"
@@ -178,4 +193,6 @@ clean:
 	rm -rf $(BUILD_DIR) iso_root initrd_staging
 	$(MAKE) -C user/init_ clean
 	$(MAKE) -C user/shell clean
+	-$(MAKE) -C user/sbase -f Makefile.kyronix clean 2>/dev/null
+	$(MAKE) -C user/fetch clean
 	$(MAKE) -C $(LIMINE_DIR) clean 2>/dev/null; true

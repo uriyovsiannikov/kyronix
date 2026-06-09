@@ -1,7 +1,7 @@
 #include "signal.h"
 #include "proc.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "syscall/syscall.h"
 
@@ -85,7 +85,7 @@ static void deliver_signal(proc_t *p, int sig, syscall_frame_t *f) {
     }
 
     if (!p->sig_actions[sig - 1].sa_restorer) {
-        kprintf("signal: sig %d has no restorer\n", sig);
+        log_warn("signal: sig %d has no restorer", sig);
         proc_do_exit(-sig);
     }
 

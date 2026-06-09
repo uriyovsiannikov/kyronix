@@ -1,6 +1,6 @@
 #include "pmm.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "arch/x86_64/cpu.h"
 
 uint64_t g_hhdm_offset;
@@ -76,11 +76,11 @@ void pmm_init(struct limine_memmap_response *mmap, uint64_t hhdm_offset) {
         }
     }
 
-    kprintf("PMM: %lu MiB free  (%lu pages, %lu total)\n",
+    log_info("PMM: %lu MiB free  (%lu pages, %lu total)",
             (uint64_t)(g_pmm.free_pages * PAGE_SIZE) >> 20,
             g_pmm.free_pages,
             g_pmm.total_pages);
-    kprintf("PMM: bitmap  phys=0x%016lx  size=%lu KiB\n",
+    log_info("PMM: bitmap  phys=0x%016lx  size=%lu KiB",
             bitmap_phys, bitmap_bytes >> 10);
 }
 

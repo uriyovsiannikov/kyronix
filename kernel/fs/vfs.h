@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include "fs/pipe.h"
 
+extern char g_cwd[512];
+
 struct linux_stat {
     uint64_t st_dev;
     uint64_t st_ino;
@@ -59,6 +61,8 @@ struct linux_dirent64 {
 #define O_NOFOLLOW  0400000
 #define O_CLOEXEC   02000000
 #define AT_FDCWD    (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_EMPTY_PATH       0x1000
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -121,6 +125,7 @@ int64_t fd_write(int fd, const void *buf, uint64_t len);
 int64_t fd_lseek(int fd, int64_t off, int whence);
 int     fd_stat(const char *path, struct linux_stat *st);
 int     fd_lstat(const char *path, struct linux_stat *st);
+int     fd_fstatat(int dirfd, const char *path, struct linux_stat *st, int flags);
 int     fd_fstat(int fd, struct linux_stat *st);
 int     fd_getdents64(int fd, void *buf, uint64_t count);
 int     fd_readlink(const char *path, char *buf, uint64_t bufsz);

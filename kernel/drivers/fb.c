@@ -177,9 +177,90 @@ static void draw_char(uint32_t col, uint32_t row, char c) {
     }
 }
 
+enum { ESC_NONE, ESC_ESC, ESC_CSI } g_esc;
+static int g_esc_params[8];
+static int g_esc_np;
+
+static const uint32_t ansi_fg[8] = {
+    COLOR_BLACK, COLOR_RED,   COLOR_GREEN, COLOR_YELLOW,
+    COLOR_BLUE,  RGB(198,120,221), COLOR_CYAN, COLOR_WHITE,
+};
+
+static const uint32_t ansi_bg[8] = {
+    COLOR_BLACK, COLOR_RED,   COLOR_GREEN, COLOR_YELLOW,
+    COLOR_BLUE,  RGB(198,120,221), COLOR_CYAN, COLOR_WHITE,
+};
+
+static void fb_erase_to_eol(void) {
+    uint32_t cols = (uint32_t)(g_fb.width / FONT_W);
+    uint32_t c = g_fb.col;
+    while (c < cols) {
+        draw_char(c, g_fb.row, ' ');
+        c++;
+    }
+}
+
+static void fb_sgr(void) {
+    for (int i = 0; i <= g_esc_np; i++) {
+        int p = g_esc_params[i];
+        switch (p) {
+        case 0:  g_fb.fg = COLOR_WHITE; g_fb.bg = COLOR_BG; break;
+        case 1:  break; /* bold — ignore */
+        case 7:  { uint32_t t = g_fb.fg; g_fb.fg = g_fb.bg; g_fb.bg = t; break; }
+        case 30 ... 37: g_fb.fg = ansi_fg[p - 30]; break;
+        case 38: break; /* extended fg — skip */
+        case 39: g_fb.fg = COLOR_WHITE; break;
+        case 40 ... 47: g_fb.bg = ansi_bg[p - 40]; break;
+        case 48: break; /* extended bg */
+        case 49: g_fb.bg = COLOR_BG; break;
+        case 90: g_fb.fg = COLOR_GRAY; break;
+        case 91 ... 97: g_fb.fg = ansi_fg[p - 90]; break;
+        case 100: g_fb.bg = COLOR_GRAY; break;
+        case 101 ... 107: g_fb.bg = ansi_bg[p - 100]; break;
+        }
+    }
+}
+
 void fb_putchar(char c) {
     uint32_t cols = (uint32_t)(g_fb.width  / FONT_W);
     uint32_t rows = (uint32_t)(g_fb.height / FONT_H);
+
+    switch (g_esc) {
+    case ESC_ESC:
+        g_esc = (c == '[') ? ESC_CSI : ESC_NONE;
+        if (g_esc == ESC_CSI) {
+            g_esc_np = 0;
+            g_esc_params[0] = 0;
+        }
+        return;
+    case ESC_CSI:
+        if (c >= '0' && c <= '9') {
+            g_esc_params[g_esc_np] = g_esc_params[g_esc_np] * 10 + (c - '0');
+            return;
+        }
+        if (c == ';') {
+            g_esc_np++;
+            if (g_esc_np >= 8) g_esc_np = 7;
+            g_esc_params[g_esc_np] = 0;
+            return;
+        }
+        g_esc = ESC_NONE;
+        if (c == 'm') { fb_sgr(); return; }
+        if (c == 'K') { fb_erase_to_eol(); return; }
+        if (c == 'D') {
+            int n = g_esc_params[0] > 0 ? g_esc_params[0] : 1;
+            while (n-- > 0 && g_fb.col > 0) g_fb.col--;
+            return;
+        }
+        return;
+    default:
+        break;
+    }
+
+    if (c == '\033') {
+        g_esc = ESC_ESC;
+        return;
+    }
 
     if (c == '\n') {
         g_fb.col = 0;

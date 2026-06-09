@@ -2,11 +2,11 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 
 int elf_load(const void *data, uint64_t size, elf_load_result_t *out) {
     if (!data || size < sizeof(Elf64_Ehdr)) {
-        kprintf("ELF: too small\n");
+        log_error("ELF: too small");
         return -1;
     }
 
@@ -16,33 +16,33 @@ int elf_load(const void *data, uint64_t size, elf_load_result_t *out) {
         ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr->e_ident[EI_MAG2] != ELFMAG2 ||
         ehdr->e_ident[EI_MAG3] != ELFMAG3) {
-        kprintf("ELF: bad magic\n");
+        log_error("ELF: bad magic");
         return -1;
     }
     if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
-        kprintf("ELF: not 64-bit\n");
+        log_error("ELF: not 64-bit");
         return -1;
     }
     if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB) {
-        kprintf("ELF: not little-endian\n");
+        log_error("ELF: not little-endian");
         return -1;
     }
     if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
-        kprintf("ELF: not executable\n");
+        log_error("ELF: not executable");
         return -1;
     }
     if (ehdr->e_machine != EM_X86_64) {
-        kprintf("ELF: not x86_64\n");
+        log_error("ELF: not x86_64");
         return -1;
     }
     if (ehdr->e_phentsize < sizeof(Elf64_Phdr) || ehdr->e_phnum == 0) {
-        kprintf("ELF: no program headers\n");
+        log_error("ELF: no program headers");
         return -1;
     }
 
     vmm_space_t *space = vmm_space_new();
     if (!space) {
-        kprintf("ELF: OOM (space)\n");
+        log_error("ELF: OOM (space)");
         return -1;
     }
 
@@ -65,7 +65,7 @@ int elf_load(const void *data, uint64_t size, elf_load_result_t *out) {
         if (ph->p_memsz == 0)      continue;
 
         if (ph->p_offset + ph->p_filesz > size) {
-            kprintf("ELF: segment out of file bounds\n");
+            log_error("ELF: segment out of file bounds");
             vmm_space_free(space);
             return -1;
         }
@@ -80,13 +80,13 @@ int elf_load(const void *data, uint64_t size, elf_load_result_t *out) {
         for (uint64_t pg = page_base; pg < page_end; pg += PAGE_SIZE) {
             void *phys = pmm_alloc_zeroed();
             if (!phys) {
-                kprintf("ELF: OOM loading segment\n");
+                log_error("ELF: OOM loading segment");
                 vmm_space_free(space);
                 return -1;
             }
 
             if (vmm_map(space, pg, (uint64_t)phys, vflags) < 0) {
-                kprintf("ELF: vmm_map failed\n");
+                log_error("ELF: vmm_map failed");
                 pmm_free(phys);
                 vmm_space_free(space);
                 return -1;
@@ -120,7 +120,7 @@ int elf_load(const void *data, uint64_t size, elf_load_result_t *out) {
     out->phentsize = ehdr->e_phentsize;
     out->phnum     = ehdr->e_phnum;
 
-    kprintf("ELF: loaded  entry=0x%lx  brk=0x%lx  phdr_va=0x%lx\n",
+    log_info("ELF: loaded  entry=0x%lx  brk=0x%lx  phdr_va=0x%lx",
             out->entry, out->brk, out->phdr_va);
     return 0;
 }

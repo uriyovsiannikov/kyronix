@@ -25,8 +25,6 @@ int main(void)
     setenv("SHELL", "/bin/ksh", 1);
     setenv("TERM", "vt100", 1);
 
-    write(STDOUT_FILENO, "Kyronix init\n", 13);
-
     for (;;) {
         pid_t pid = fork();
         if (pid == 0) {

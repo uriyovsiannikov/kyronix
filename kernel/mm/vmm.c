@@ -1,6 +1,6 @@
 #include "vmm.h"
 #include "pmm.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 #include "lib/string.h"
 #include "arch/x86_64/cpu.h"
 
@@ -37,7 +37,7 @@ void vmm_init(void) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     g_kernel_space.pml4_phys = cr3 & PTE_ADDR_MASK;
 
-    kprintf("VMM: PML4=0x%016lx  NX enabled\n", g_kernel_space.pml4_phys);
+    log_info("VMM: PML4=0x%016lx  NX enabled", g_kernel_space.pml4_phys);
 }
 
 int vmm_map(vmm_space_t *sp, uint64_t virt, uint64_t phys, uint64_t flags) {

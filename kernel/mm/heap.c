@@ -2,7 +2,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "lib/string.h"
-#include "lib/printf.h"
+#include "lib/log.h"
 
 typedef struct block_hdr {
     uint64_t          size;
@@ -59,7 +59,7 @@ static block_hdr_t *heap_grow(void) {
 
 void heap_init(void) {
     heap_grow();
-    kprintf("Heap: base=0x%016lx  initial=%lu KiB\n",
+    log_info("Heap: base=0x%016lx  initial=%lu KiB",
             (uint64_t)HEAP_START, (uint64_t)(GROW_BYTES >> 10));
 }
 
@@ -146,6 +146,6 @@ void heap_stats(void) {
         else         used_bytes += b->size;
         b = b->next;
     }
-    kprintf("Heap: %lu blocks  used=%lu KiB  free=%lu KiB\n",
+    log_info("Heap: %lu blocks  used=%lu KiB  free=%lu KiB",
             nblocks, used_bytes >> 10, free_bytes >> 10);
 }
