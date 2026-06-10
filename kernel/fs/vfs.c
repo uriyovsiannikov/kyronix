@@ -1,4 +1,5 @@
 #include "vfs.h"
+#include "syscall/syscall.h"
 #include "arch/x86_64/cpu.h"
 #include "drivers/fb.h"
 #include "drivers/serial.h"
@@ -396,6 +397,18 @@ static int64_t dev_zero_read(vfs_node_t* n, char* buf, uint64_t len, uint64_t of
     memset(buf, 0, len);
     return (int64_t) len;
 }
+static int64_t dev_urandom_read(vfs_node_t* n, char* buf, uint64_t len, uint64_t off)
+{
+    (void) n; (void) off;
+    static uint64_t s = 0xdeadbeef13579aceULL;
+    uint8_t* p = (uint8_t*) buf;
+    for (uint64_t i = 0; i < len; i++)
+    {
+        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        p[i] = (uint8_t) s;
+    }
+    return (int64_t) len;
+}
 static int64_t dev_tty_read(vfs_node_t* n, char* buf, uint64_t len, uint64_t off)
 {
     (void) n;
@@ -428,11 +441,70 @@ bool fd_valid(int fd)
     return fd_get(fd) != NULL;
 }
 
+vfs_node_t* fd_get_node(int fd)
+{
+    vfs_file_t* f = fd_get(fd);
+    return f ? f->node : NULL;
+}
+
+bool fd_pollin(int fd)
+{
+    vfs_file_t* f = fd_get(fd);
+    if (!f) return false;
+    if (f->wpipe) /* socket: readable when read-pipe has data */
+        return f->pipe->count > 0 || f->pipe->write_refs == 0;
+    if (f->pipe)
+        return f->pipe_end == PIPE_END_READ &&
+               (f->pipe->count > 0 || f->pipe->write_refs == 0);
+    if (!f->node) return false;
+    if (f->node->type == VFS_TYPE_CHR)
+        return tty_data_ready();
+    return true;
+}
+
+bool fd_pollout(int fd)
+{
+    vfs_file_t* f = fd_get(fd);
+    if (!f) return false;
+    if (f->wpipe) /* socket: writable when write-pipe has space */
+        return f->wpipe->count < PIPE_BUFSZ && f->wpipe->read_refs > 0;
+    if (f->pipe)
+        return f->pipe_end == PIPE_END_WRITE &&
+               f->pipe->count < PIPE_BUFSZ && f->pipe->read_refs > 0;
+    return f->node != NULL;
+}
+
+static void pipe_drop_write(pipe_t* p)
+{
+    if (!p) return;
+    if (p->write_refs) p->write_refs--;
+    if (p->write_refs == 0 && p->waiting_reader)
+    {
+        proc_t* reader = (proc_t*) p->waiting_reader;
+        if (reader->state == PROC_WAITING)
+            reader->state = PROC_READY;
+    }
+}
+
+static void pipe_maybe_free(pipe_t* p)
+{
+    if (p && p->read_refs == 0 && p->write_refs == 0)
+        kfree(p);
+}
+
 static void file_close(vfs_file_t* f)
 {
     if (!f)
         return;
-    if (f->pipe)
+    if (f->wpipe)
+    {
+        /* socket fd: f->pipe is the read pipe, f->wpipe is the write pipe */
+        if (f->pipe->read_refs) f->pipe->read_refs--;
+        pipe_maybe_free(f->pipe);
+        pipe_drop_write(f->wpipe);
+        pipe_maybe_free(f->wpipe);
+    }
+    else if (f->pipe)
     {
         if (f->pipe_end == PIPE_END_READ)
         {
@@ -441,18 +513,9 @@ static void file_close(vfs_file_t* f)
         }
         else
         {
-            if (f->pipe->write_refs)
-                f->pipe->write_refs--;
-            /* wake a waiting reader when the last write end closes */
-            if (f->pipe->write_refs == 0 && f->pipe->waiting_reader)
-            {
-                proc_t* reader = (proc_t*) f->pipe->waiting_reader;
-                if (reader->state == PROC_WAITING)
-                    reader->state = PROC_READY;
-            }
+            pipe_drop_write(f->pipe);
         }
-        if (f->pipe->read_refs == 0 && f->pipe->write_refs == 0)
-            kfree(f->pipe);
+        pipe_maybe_free(f->pipe);
     }
     kfree(f);
 }
@@ -461,6 +524,12 @@ static void file_addref(vfs_file_t* f)
 {
     if (!f || !f->pipe)
         return;
+    if (f->wpipe)
+    {
+        f->pipe->read_refs++;
+        f->wpipe->write_refs++;
+        return;
+    }
     if (f->pipe_end == PIPE_END_READ)
         f->pipe->read_refs++;
     else
@@ -540,8 +609,10 @@ void vfs_init(void)
     vfs_mkdir_p("/tmp", 01777);
     vfs_mkdir_p("/etc", 0755);
 
-    vfs_create_chr("/dev/null", dev_null_read, dev_null_write);
-    vfs_create_chr("/dev/zero", dev_zero_read, dev_null_write);
+    vfs_create_chr("/dev/null",    dev_null_read,    dev_null_write);
+    vfs_create_chr("/dev/zero",    dev_zero_read,    dev_null_write);
+    vfs_create_chr("/dev/urandom", dev_urandom_read, dev_null_write);
+    vfs_create_chr("/dev/random",  dev_urandom_read, dev_null_write);
     vfs_create_chr("/dev/tty", dev_tty_read, dev_tty_write);
     vfs_create_chr("/dev/stdin", dev_tty_read, dev_null_write);
     vfs_create_chr("/dev/stdout", dev_null_read, dev_tty_write);
@@ -621,10 +692,57 @@ int fd_pipe(int pipefd[2])
     return 0;
 }
 
+int fd_socketpair(int sv[2])
+{
+    /* two cross-connected pipes: sv[0] reads pipe_a, writes pipe_b; sv[1] vice versa */
+    pipe_t* pa = pipe_alloc();
+    pipe_t* pb = pipe_alloc();
+    if (!pa || !pb) { kfree(pa); kfree(pb); return -(int) ENOMEM; }
+
+    pa->read_refs = 1; pa->write_refs = 1;
+    pb->read_refs = 1; pb->write_refs = 1;
+
+    int fd0 = fd_alloc_from(0);
+    int fd1 = (fd0 >= 0) ? fd_alloc_from(0) : -1;
+    if (fd0 < 0 || fd1 < 0)
+    {
+        if (fd0 >= 0) g_fds[fd0] = NULL;
+        kfree(pa); kfree(pb);
+        return -(int) EMFILE;
+    }
+
+    vfs_file_t* f0 = (vfs_file_t*) kcalloc(1, sizeof(vfs_file_t));
+    vfs_file_t* f1 = (vfs_file_t*) kcalloc(1, sizeof(vfs_file_t));
+    if (!f0 || !f1) { kfree(f0); kfree(f1); kfree(pa); kfree(pb); return -(int) ENOMEM; }
+
+    f0->pipe = pa; f0->wpipe = pb; f0->pipe_end = PIPE_END_READ; f0->flags = O_RDWR;
+    f1->pipe = pb; f1->wpipe = pa; f1->pipe_end = PIPE_END_READ; f1->flags = O_RDWR;
+
+    g_fds[fd0] = f0;
+    g_fds[fd1] = f1;
+    sv[0] = fd0;
+    sv[1] = fd1;
+    return 0;
+}
+
 int fd_open(const char* path, int flags, int mode)
 {
     if (!path)
         return -(int) ENOENT;
+
+    /* /proc/self/fd/N and /dev/fd/N — dup the existing fd */
+    const char* fd_prefix = NULL;
+    if (strncmp(path, "/proc/self/fd/", 14) == 0)
+        fd_prefix = path + 14;
+    else if (strncmp(path, "/dev/fd/", 8) == 0)
+        fd_prefix = path + 8;
+    if (fd_prefix && *fd_prefix >= '0' && *fd_prefix <= '9')
+    {
+        int src = 0;
+        for (const char* p = fd_prefix; *p >= '0' && *p <= '9'; p++)
+            src = src * 10 + (*p - '0');
+        return fd_dup(src);
+    }
 
     vfs_node_t* n = (flags & O_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
 
@@ -696,6 +814,9 @@ int64_t fd_read(int fd, void* buf, uint64_t len)
     if (len == 0)
         return 0;
 
+    if (f->wpipe) /* socket */
+        return pipe_read(f->pipe, buf, len);
+
     /* Pipe */
     if (f->pipe)
     {
@@ -733,6 +854,9 @@ int64_t fd_write(int fd, const void* buf, uint64_t len)
         return -(int64_t) EBADF;
     if (len == 0)
         return 0;
+
+    if (f->wpipe) /* socket */
+        return pipe_write(f->wpipe, buf, len);
 
     /* Pipe */
     if (f->pipe)

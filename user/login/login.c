@@ -97,7 +97,6 @@ int main(void)
     }
 
     for (;;) {
-        putstr("\033[2J\033[H");
         setspent();
 
         for (;;) {

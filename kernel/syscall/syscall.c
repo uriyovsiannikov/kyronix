@@ -20,6 +20,9 @@
 #define ESRCH 3
 #define EINTR 4
 #define EBADF 9
+#define EACCES 13
+#define EEXIST 17
+#define ENOSPC 28
 #define ECHILD 10
 #define EAGAIN 11
 #define ENOMEM 12
@@ -29,8 +32,11 @@
 #define EINVAL 22
 #define EMFILE 24
 #define ENOSYS 38
+#define ETIMEDOUT 110
 
 vmm_space_t* g_current_space = NULL;
+
+static void cleartid_wake(uint32_t* addr);
 
 static inline proc_t* cur(void)
 {
@@ -71,6 +77,7 @@ static int64_t sys_brk(uint64_t addr)
 
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
+#define PROT_EXEC 0x4
 #define MAP_ANON 0x20
 #define MAP_FIXED 0x10
 
@@ -82,8 +89,6 @@ static int64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t 
     proc_t* p = cur();
     if (!p || !p->space)
         return -(int64_t) ENOMEM;
-    if (!(flags & MAP_ANON))
-        return -(int64_t) ENOSYS;
     if (!length)
         return -(int64_t) EINVAL;
     length = PAGE_ALIGN_UP(length);
@@ -92,6 +97,33 @@ static int64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t 
     uint64_t vf = VMM_UDATA;
     if (!(prot & PROT_WRITE))
         vf &= ~(uint64_t) VMM_WRITE;
+
+    if (!(flags & MAP_ANON))
+    {
+        /* file-backed: MAP_PRIVATE — allocate pages and copy file content */
+        vfs_node_t* fn = fd_get_node((int) fd);
+        if (!fn || fn->type != VFS_TYPE_REG)
+            return -(int64_t) EBADF;
+        uint64_t file_size = fn->size;
+        for (uint64_t o = 0; o < length; o += PAGE_SIZE)
+        {
+            void* ph = pmm_alloc_zeroed();
+            if (!ph) return -(int64_t) ENOMEM;
+            if (vmm_map(p->space, va + o, (uint64_t) ph, vf) < 0)
+            {
+                pmm_free(ph);
+                return -(int64_t) ENOMEM;
+            }
+            if (fn->data && off + o < file_size)
+            {
+                uint64_t copy = file_size - (off + o);
+                if (copy > PAGE_SIZE) copy = PAGE_SIZE;
+                memcpy(phys_to_virt((uint64_t) ph), fn->data + off + o, copy);
+            }
+        }
+        return (int64_t) va;
+    }
+
     for (uint64_t o = 0; o < length; o += PAGE_SIZE)
     {
         void* ph = pmm_alloc_zeroed();
@@ -108,6 +140,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t 
 
 static int64_t sys_munmap(uint64_t addr, uint64_t len)
 {
+    if (!uptr_ok((void*) addr, len)) return -(int64_t) EINVAL;
     proc_t* p = cur();
     if (!p)
         return -(int64_t) EINVAL;
@@ -116,11 +149,17 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
     return 0;
 }
 
-static int64_t sys_mprotect(uint64_t a, uint64_t l, uint64_t f)
+static int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot)
 {
-    (void) a;
-    (void) l;
-    (void) f;
+    proc_t* p = cur();
+    if (!p || !len) return 0;
+    addr = PAGE_ALIGN_DOWN(addr);
+    len  = PAGE_ALIGN_UP(len);
+    uint64_t flags = VMM_USER | VMM_NX;
+    if (prot & PROT_WRITE) flags |= VMM_WRITE;
+    if (prot & PROT_EXEC)  flags &= ~(uint64_t) VMM_NX;
+    for (uint64_t o = 0; o < len; o += PAGE_SIZE)
+        vmm_protect(p->space, addr + o, flags);
     return 0;
 }
 
@@ -153,6 +192,8 @@ static int64_t sys_fork(syscall_frame_t* f)
     memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
     child->pending_sigs = 0;
     child->fs_base = parent->fs_base;
+    child->uid = parent->uid;
+    child->gid = parent->gid;
     memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 
     uint8_t* ksp = child->kstack + KSTACK_SIZE;
@@ -323,6 +364,20 @@ __attribute__((noreturn)) void proc_do_exit(int code)
     vfs_free_fdtable(p->fds);
     p->fds = NULL;
 
+    if (p->is_thread)
+    {
+        if (p->cleartid_addr)
+        {
+            *p->cleartid_addr = 0;
+            cleartid_wake(p->cleartid_addr);
+        }
+        kfree(p->kstack);
+        p->kstack = NULL;
+        memset(p, 0, sizeof(*p));
+        p->state = PROC_UNUSED;
+        cpu_halt();
+    }
+
     p->exit_code = code;
     p->state = PROC_ZOMBIE;
 
@@ -443,7 +498,7 @@ static int64_t sys_uname(struct utsname* buf)
         return -(int64_t) EFAULT;
     memset(buf, 0, sizeof(*buf));
     memcpy(buf->sysname, "Kyronix", 7);
-    memcpy(buf->nodename, "localhost", 9);
+    memcpy(buf->nodename, "kx", 2);
     memcpy(buf->release, "0.0.1", 5);
     memcpy(buf->version, "#1 SMP", 6);
     memcpy(buf->machine, "x86_64", 6);
@@ -486,20 +541,43 @@ static int64_t sys_getppid(void)
 {
     return cur() ? (int64_t) cur()->ppid : 0;
 }
-static int64_t sys_getuid(void)
+static int64_t sys_getuid(void)  { proc_t* p = cur(); return p ? (int64_t) p->uid : 0; }
+static int64_t sys_getgid(void)  { proc_t* p = cur(); return p ? (int64_t) p->gid : 0; }
+static int64_t sys_geteuid(void) { return sys_getuid(); }
+static int64_t sys_getegid(void) { return sys_getgid(); }
+
+static int64_t sys_setuid(uint32_t uid)
 {
+    proc_t* p = cur();
+    if (!p) return -(int64_t) EPERM;
+    if (p->uid != 0 && p->uid != uid) return -(int64_t) EPERM;
+    p->uid = uid;
     return 0;
 }
-static int64_t sys_getgid(void)
+static int64_t sys_setgid(uint32_t gid)
 {
+    proc_t* p = cur();
+    if (!p) return -(int64_t) EPERM;
+    if (p->uid != 0 && p->gid != gid) return -(int64_t) EPERM;
+    p->gid = gid;
     return 0;
 }
-static int64_t sys_geteuid(void)
+static int64_t sys_setreuid(uint32_t ruid, uint32_t euid)
 {
+    proc_t* p = cur();
+    if (!p) return -(int64_t) EPERM;
+    if (p->uid != 0) return -(int64_t) EPERM;
+    if (ruid != (uint32_t)-1) p->uid = ruid;
+    (void) euid;
     return 0;
 }
-static int64_t sys_getegid(void)
+static int64_t sys_setregid(uint32_t rgid, uint32_t egid)
 {
+    proc_t* p = cur();
+    if (!p) return -(int64_t) EPERM;
+    if (p->uid != 0) return -(int64_t) EPERM;
+    if (rgid != (uint32_t)-1) p->gid = rgid;
+    (void) egid;
     return 0;
 }
 static int64_t sys_getpgrp(void)
@@ -725,6 +803,45 @@ static int64_t sys_pause(void)
     return -(int64_t) EINTR;
 }
 
+static int64_t sys_rt_sigsuspend(const uint64_t* mask, uint64_t sigsetsize)
+{
+    (void) sigsetsize;
+    proc_t* p = cur();
+    if (!p) return 0;
+    uint64_t saved = p->sig_mask;
+    if (mask)
+    {
+        p->sig_mask = *mask & ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    }
+    while (!(p->pending_sigs & ~p->sig_mask))
+    {
+        proc_t* next = NULL;
+        for (int i = 0; i < PROC_MAX; i++)
+        {
+            if (&g_proctable[i] == p) continue;
+            if (g_proctable[i].state == PROC_READY) { next = &g_proctable[i]; break; }
+        }
+        if (!next)
+        {
+            cpu_set_kernel_stack(p->kstack_top);
+            sti(); hlt();
+            continue;
+        }
+        p->state = PROC_WAITING;
+        next->state = PROC_RUNNING;
+        vfs_set_fdtable(next->fds);
+        g_current_space = next->space;
+        cpu_set_kernel_stack(next->kstack_top);
+        sched_switch(next);
+        p->state = PROC_RUNNING;
+        vfs_set_fdtable(p->fds);
+        g_current_space = p->space;
+        cpu_set_kernel_stack(p->kstack_top);
+    }
+    p->sig_mask = saved;
+    return -(int64_t) EINTR;
+}
+
 static int64_t sys_nanosleep(void* r, void* m)
 {
     (void) m;
@@ -801,8 +918,9 @@ static int64_t sys_rename(const char* oldpath, const char* newpath)
 
 static int64_t sys_set_tid_address(void* p)
 {
-    (void) p;
-    return sys_getpid();
+    proc_t* proc = cur();
+    if (proc) proc->cleartid_addr = (uint32_t*) p;
+    return (int64_t) sys_getpid();
 }
 static int64_t sys_set_robust_list(void* h, uint64_t l)
 {
@@ -814,23 +932,87 @@ static int64_t sys_set_robust_list(void* h, uint64_t l)
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_PRIVATE_FLAG 128
+#define FUTEX_CLOCK_REALTIME 256
+
+#define FUTEX_MAX_WAITERS PROC_MAX
+
+typedef struct {
+    uint32_t* uaddr;
+    proc_t*   proc;
+} futex_entry_t;
+
+static futex_entry_t g_futex_tab[FUTEX_MAX_WAITERS];
+
+static void cleartid_wake(uint32_t* addr)
+{
+    for (int i = 0; i < FUTEX_MAX_WAITERS; i++)
+    {
+        if (g_futex_tab[i].uaddr == addr && g_futex_tab[i].proc)
+        {
+            g_futex_tab[i].proc->state = PROC_READY;
+            g_futex_tab[i].proc = NULL;
+        }
+    }
+}
+
 static int64_t sys_futex(uint32_t* uaddr, int op, uint32_t val, void* timeout, uint32_t* uaddr2,
                          uint32_t val3)
 {
-    (void) timeout;
     (void) uaddr2;
     (void) val3;
-    if (!uaddr)
+    if (!uaddr || !uptr_ok(uaddr, sizeof(*uaddr)))
         return -(int64_t) EFAULT;
-    int cmd = op & ~FUTEX_PRIVATE_FLAG;
+    int cmd = op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
     switch (cmd)
     {
     case FUTEX_WAIT:
+    {
         if (*uaddr != val)
             return -(int64_t) EAGAIN;
-        return 0;
+        proc_t* p = cur();
+        if (!p) return -(int64_t) EFAULT;
+        int slot = -1;
+        for (int i = 0; i < FUTEX_MAX_WAITERS; i++)
+            if (!g_futex_tab[i].proc) { slot = i; break; }
+        if (slot < 0) return -(int64_t) ENOMEM;
+        g_futex_tab[slot].uaddr = uaddr;
+        g_futex_tab[slot].proc  = p;
+        uint64_t deadline = 0;
+        if (timeout) {
+            uint64_t ms = ((uint64_t*) timeout)[0] * 1000 + ((uint64_t*) timeout)[1] / 1000000;
+            if (ms) deadline = g_ticks + ms;
+        }
+        p->wakeup_tick = deadline;
+        while (g_futex_tab[slot].proc == p) {
+            if (deadline && g_ticks >= deadline) break;
+            if (proc_next_ready(p))
+                sched_yield_blocking();
+            else {
+                sti();
+                hlt();
+                cli();
+            }
+        }
+        bool timed_out = deadline && g_ticks >= deadline;
+        p->wakeup_tick = 0;
+        if (g_futex_tab[slot].proc == p)
+            g_futex_tab[slot].proc = NULL;
+        return timed_out ? -(int64_t) ETIMEDOUT : 0;
+    }
     case FUTEX_WAKE:
-        return 0;
+    {
+        int woken = 0;
+        for (int i = 0; i < FUTEX_MAX_WAITERS && woken < (int) val; i++) {
+            if (g_futex_tab[i].uaddr == uaddr && g_futex_tab[i].proc) {
+                g_futex_tab[i].proc->wakeup_tick = 0;
+                if (g_futex_tab[i].proc->state == PROC_WAITING)
+                    g_futex_tab[i].proc->state = PROC_READY;
+                g_futex_tab[i].proc = NULL;
+                woken++;
+            }
+        }
+        return (int64_t) woken;
+    }
     default:
         return -(int64_t) ENOSYS;
     }
@@ -874,6 +1056,11 @@ static int64_t sys_prctl(int op, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t
     (void) a5;
     return 0;
 }
+
+#define POLLIN   0x0001
+#define POLLOUT  0x0004
+#define POLLHUP  0x0010
+#define POLLNVAL 0x0020
 
 struct pollfd_s
 {
@@ -947,24 +1134,45 @@ static int64_t sys_ppoll(struct pollfd_s* fds, uint64_t nfds, void* tmo, const v
 
 static int64_t sys_select(int nfds, void* rfds, void* wfds, void* efds, void* timeout)
 {
-    (void) nfds;
-    (void) rfds;
-    (void) wfds;
     (void) efds;
-    (void) timeout;
-    return 0;
+    uint64_t deadline = (uint64_t) -1ULL;
+    if (timeout) {
+        uint64_t ms = ((uint64_t*) timeout)[0] * 1000 + ((uint64_t*) timeout)[1] / 1000;
+        deadline = g_ticks + ms;
+    }
+    uint8_t rout[128], wout[128];
+    proc_t* p = cur();
+    for (;;) {
+        memset(rout, 0, sizeof(rout));
+        memset(wout, 0, sizeof(wout));
+        int ready = 0;
+        for (int fd = 0; fd < nfds && fd < VFS_FD_MAX; fd++) {
+            if (fds_test((uint8_t*) rfds, fd) && fd_pollin(fd))  { fds_set(rout, fd); ready++; }
+            if (fds_test((uint8_t*) wfds, fd) && fd_pollout(fd)) { fds_set(wout, fd); ready++; }
+        }
+        if (ready > 0 || g_ticks >= deadline) {
+            if (rfds) memcpy(rfds, rout, sizeof(rout));
+            if (wfds) memcpy(wfds, wout, sizeof(wout));
+            return (int64_t) ready;
+        }
+        if (p && (p->pending_sigs & ~p->sig_mask)) return -(int64_t) EINTR;
+        if (proc_next_ready(p))
+            sched_yield_blocking();
+        else { sti(); hlt(); cli(); }
+    }
 }
 
 static int64_t sys_pselect6(int nfds, void* rfds, void* wfds, void* efds, void* timeout,
                             void* sigmask)
 {
-    (void) nfds;
-    (void) rfds;
-    (void) wfds;
-    (void) efds;
-    (void) timeout;
     (void) sigmask;
-    return 0;
+    /* pselect uses timespec (nsec), convert to timeval-style (usec) for sys_select */
+    uint64_t tv[2] = {0, 0};
+    if (timeout) {
+        tv[0] = ((uint64_t*) timeout)[0];
+        tv[1] = ((uint64_t*) timeout)[1] / 1000;
+    }
+    return sys_select(nfds, rfds, wfds, efds, timeout ? tv : NULL);
 }
 
 static int64_t sys_umask(uint64_t mask)
@@ -975,9 +1183,32 @@ static int64_t sys_umask(uint64_t mask)
 
 static int64_t sys_ftruncate(int fd, uint64_t len)
 {
-    (void) fd;
-    (void) len;
+    vfs_node_t* n = fd_get_node(fd);
+    if (!n) return -(int64_t) EBADF;
+    if (n->type != VFS_TYPE_REG) return -(int64_t) EINVAL;
+    if (len < n->size) n->size = len;
     return 0;
+}
+
+static int64_t sys_truncate(const char* path, uint64_t len)
+{
+    if (!path) return -(int64_t) EFAULT;
+    char abs[512];
+    path_abs(abs, path);
+    vfs_node_t* n = vfs_lookup(abs[0] ? abs : path);
+    if (!n) return -(int64_t) ENOENT;
+    if (n->type != VFS_TYPE_REG) return -(int64_t) EINVAL;
+    if (len < n->size) n->size = len;
+    return 0;
+}
+
+static int64_t sys_symlink(const char* target, const char* linkpath)
+{
+    if (!target || !linkpath) return -(int64_t) EFAULT;
+    char abs[512];
+    path_abs(abs, linkpath);
+    vfs_node_t* n = vfs_create_symlink(abs[0] ? abs : linkpath, target);
+    return n ? 0 : -(int64_t) EEXIST;
 }
 
 static int64_t sys_statfs(const char* path, void* buf)
@@ -1184,6 +1415,9 @@ void syscall_dispatch(syscall_frame_t* f)
     case 22:
         ret = fd_pipe((int*) a1);
         break;
+    case 53:
+        ret = fd_socketpair((int*) a4);
+        break;
     case 23:
         ret = sys_select((int) a1, (void*) a2, (void*) a3, (void*) a4, (void*) a5);
         break;
@@ -1211,6 +1445,9 @@ void syscall_dispatch(syscall_frame_t* f)
     case 39:
         ret = sys_getpid();
         break;
+    case 56:
+        ret = sys_clone(a1, a2, (uint32_t*) a3, (uint32_t*) a4, a5, f);
+        break;
     case 57:
         ret = sys_fork(f);
         break;
@@ -1231,6 +1468,9 @@ void syscall_dispatch(syscall_frame_t* f)
         break;
     case 72:
         ret = fd_fcntl((int) a1, (int) a2, a3);
+        break;
+    case 76:
+        ret = sys_truncate((const char*) a1, a2);
         break;
     case 77:
         ret = sys_ftruncate((int) a1, a2);
@@ -1256,6 +1496,9 @@ void syscall_dispatch(syscall_frame_t* f)
     case 87:
         ret = sys_unlink((const char*) a1);
         break;
+    case 88:
+        ret = sys_symlink((const char*) a1, (const char*) a2);
+        break;
     case 89:
         ret = fd_readlink((const char*) a1, (char*) a2, a3);
         break;
@@ -1278,7 +1521,10 @@ void syscall_dispatch(syscall_frame_t* f)
         ret = sys_getgid();
         break;
     case 105:
-        ret = sys_setgroups((int) a1, (uint32_t*) a2);
+        ret = sys_setuid((uint32_t) a1);
+        break;
+    case 106:
+        ret = sys_setgid((uint32_t) a1);
         break;
     case 107:
         ret = sys_geteuid();
@@ -1298,11 +1544,23 @@ void syscall_dispatch(syscall_frame_t* f)
     case 112:
         ret = sys_setsid();
         break;
+    case 113:
+        ret = sys_setreuid((uint32_t) a1, (uint32_t) a2);
+        break;
+    case 114:
+        ret = sys_setregid((uint32_t) a1, (uint32_t) a2);
+        break;
     case 115:
         ret = sys_getgroups((int) a1, (uint32_t*) a2);
         break;
+    case 116:
+        ret = sys_setgroups((int) a1, (uint32_t*) a2);
+        break;
     case 121:
         ret = sys_getpgid(a1);
+        break;
+    case 130:
+        ret = sys_rt_sigsuspend((const uint64_t*) a1, a2);
         break;
     case 131:
         ret = sys_sigaltstack((const void*) a1, (void*) a2);
@@ -1369,12 +1627,28 @@ void syscall_dispatch(syscall_frame_t* f)
         ret = sys_pselect6((int) a1, (void*) a2, (void*) a3, (void*) a4, (void*) a5, (void*) a6);
         break;
     case 271:
-        ret = sys_ppoll((struct pollfd_s*) a1, a2, (void*) a3, (const void*) a4, a5);
+        ret = sys_ppoll((struct po.claude
+*.o
+*.d
+*.elf
+*.cpio
+kyronix.iso
+user/init
+user/hello
+build/*llfd_s*) a1, a2, (void*) a3, (const void*) a4, a5);
         break;
     case 273:
         ret = sys_set_robust_list((void*) a1, a2);
         break;
-    case 292:
+    case 292:.claude
+*.o
+*.d
+*.elf
+*.cpio
+kyronix.iso
+user/init
+user/hello
+build/*
         ret = fd_dup2((int) a1, (int) a2);
         break;
     case 293:
@@ -1388,7 +1662,15 @@ void syscall_dispatch(syscall_frame_t* f)
         break;
 
     default:
-        log_debug("[syscall %lu  a1=%lx a2=%lx a3=%lx]", nr, a1, a2, a3);
+        log_debug("[syscall %.claude
+*.o
+*.d
+*.elf
+*.cpio
+kyronix.iso
+user/init
+user/hello
+build/*lu  a1=%lx a2=%lx a3=%lx]", nr, a1, a2, a3);
         ret = -(int64_t) ENOSYS;
         break;
     }

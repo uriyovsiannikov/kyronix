@@ -265,6 +265,11 @@ void fb_putchar(char c)
             while (n-- > 0 && g_fb.col > 0)
                 g_fb.col--;
         }
+        else if (c == 'G')
+        {
+            uint32_t co = (uint32_t) (g_esc_params[0] > 0 ? g_esc_params[0] - 1 : 0);
+            if (co < cols) g_fb.col = co;
+        }
         else if (c == 'H')
         {
             uint32_t r = (uint32_t) (g_esc_params[0] > 0 ? g_esc_params[0] - 1 : 0);

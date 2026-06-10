@@ -157,8 +157,6 @@ void kmain(void)
     fb_init(lfb);
     fb_clear(COLOR_BG);
 
-    // print_system_info(lfb);
-
     {
         void* p[4];
         bool pmm_ok = true;

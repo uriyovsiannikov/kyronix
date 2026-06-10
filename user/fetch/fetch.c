@@ -1,5 +1,3 @@
-//! AIused
-
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,11 +5,6 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
-/*
- * ASCII art placeholder — replace with your own.
- * Each string in the array is one line.
- * Must all be the same width (padded with spaces).
- */
 static const char* logo[] = {
     " ____  __.  ",
     "|    |/ _|  ",
@@ -46,7 +39,6 @@ int main(void)
 
     snprintf(osline, sizeof(osline), "%s %s", uts.sysname, uts.release);
 
-    /* header */
     {
         int hlen = strlen(user) + 1 + strlen(host);
         printf("%s  \033[1;36m%s@%s\033[0m\n", logo[0], user, host);
@@ -56,7 +48,6 @@ int main(void)
         putchar('\n');
     }
 
-    /* info lines, interleaved with logo rows */
     {
         const char* labels[] = {"OS", "Kernel", "Shell"};
         const char* values[] = {osline, uts.machine, shell};
@@ -76,17 +67,8 @@ int main(void)
             printf("%s\033[90m%-*s:\033[0m %s\n", l, maxw, labels[i], values[i]);
         }
 
-        /* remaining logo lines */
         for (i = n + 2; i < LOGO_LEN; i++)
             printf("%s\n", logo[i]);
-    }
-
-    /* palette bar — aligned to match indent of info values */
-    {
-        int lw = (int) strlen(logo[0]);
-        printf("\n%*s", lw, "");
-        printf(" \033[40m  \033[41m  \033[42m  \033[43m  "
-               "  \033[44m  \033[45m  \033[46m  \033[47m\033[0m\n");
     }
 
     return 0;

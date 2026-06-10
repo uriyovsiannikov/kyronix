@@ -229,7 +229,7 @@ static void terminal_enable_raw(void)
     }
 
     struct termios raw = saved_termios;
-    raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+    raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ISIG);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
@@ -248,11 +248,11 @@ static void terminal_restore(void)
 static int read_byte(void)
 {
     unsigned char byte = 0;
-    if (read(STDIN_FILENO, &byte, 1) != 1)
-    {
-        return -1;
-    }
-    return byte;
+    ssize_t r;
+    do {
+        r = read(STDIN_FILENO, &byte, 1);
+    } while (r < 0 && errno == EINTR);
+    return (r == 1) ? (int) byte : -1;
 }
 
 static int read_escape_sequence(void)
@@ -462,13 +462,7 @@ static void complete_token(char* line, size_t* cursor, size_t* length)
 
             if (slash != NULL)
             {
-                char prefixed[PATH_MAX];
-                size_t prefix_len = (size_t) (slash - token + 1);
-                memcpy(prefixed, token, prefix_len);
-                prefixed[prefix_len] = '\0';
-                strncat(prefixed, full + (slash == token ? 1 : 0),
-                        sizeof(prefixed) - strlen(prefixed) - 1);
-                snprintf(matches[match_count], sizeof(matches[match_count]), "%s", prefixed);
+                snprintf(matches[match_count], sizeof(matches[match_count]), "%s", full);
             }
             else
             {
@@ -576,11 +570,17 @@ static int read_line(char* line, size_t size)
             return 0;
         }
 
+        if (key == 3) /* Ctrl+C: cancel current line */
+        {
+            write(STDERR_FILENO, "^C\n", 3);
+            terminal_restore();
+            return 2;
+        }
+
         if (key == 4)
         {
             terminal_restore();
-            raise(SIGINT);
-            return -1;
+            return -1; /* EOF */
         }
 
         if (key == 127 || key == 8)
@@ -999,7 +999,10 @@ int main(void)
 
     for (;;)
     {
-        if (read_line(line, sizeof(line)) != 0)
+        int rl = read_line(line, sizeof(line));
+        if (rl == 2)
+            continue;
+        if (rl != 0)   /* EOF or error */
         {
             putchar('\n');
             break;

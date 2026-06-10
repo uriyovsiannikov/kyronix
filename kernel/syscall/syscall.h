@@ -1,6 +1,16 @@
 #pragma once
 #include "mm/vmm.h"
+#include <stdbool.h>
 #include <stdint.h>
+
+/* highest valid user virtual address + 1 */
+#define USER_LIMIT 0x800000000000ULL
+
+static inline bool uptr_ok(const void* p, uint64_t len)
+{
+    uint64_t base = (uint64_t)(uintptr_t) p;
+    return base < USER_LIMIT && (!len || base + len <= USER_LIMIT);
+}
 
 /* push order in syscall_entry.S: rax last -> rax at rsp+0 */
 typedef struct

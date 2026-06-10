@@ -9,9 +9,8 @@
 static bool g_shift, g_ctrl, g_alt, g_caps;
 static bool g_ext; /* got 0xE0 prefix, next byte completes the scan code */
 
-/* Escape-sequence state machine for extended keys */
-static const char* g_ext_seq;      /* current escape sequence being emitted */
-static int g_ext_seq_idx;          /* index of next byte to return (-1 = idle) */
+static const char* g_ext_seq;
+static int g_ext_seq_idx;
 
 static const char seq_up[]    = {0x1B, '[', 'A', 0};
 static const char seq_down[]  = {0x1B, '[', 'B', 0};
@@ -52,8 +51,6 @@ static const char sc_shift_ascii[128] = {
 
 void kbd_init(void)
 {
-    /* PS/2 controller: enable keyboard port (port 2 is already disabled by BIOS).
-     * Command 0xAE = enable first PS/2 port (keyboard). */
     while (inb(KBD_STAT) & 2)
         cpu_relax();
     outb(KBD_STAT, 0xAE);

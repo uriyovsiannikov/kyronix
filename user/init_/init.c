@@ -8,16 +8,19 @@
 #include <string.h>
 #include <unistd.h>
 
-#define COL_GRN "\033[0;32m"
-#define COL_RED "\033[0;31m"
-#define COL_RST "\033[0m"
+#define STATUS_COL 72
+
+#define COL_GRN  "\033[0;32m"
+#define COL_RED  "\033[0;31m"
+#define COL_BOLD "\033[1m"
+#define COL_RST  "\033[0m"
 
 #define MAX_LINE     256
 #define MAX_SERVICES  32
 #define MAX_ARGS       8
 
 struct service {
-    char name[64];
+    char  name[64];
     char *argv[MAX_ARGS];
 };
 
@@ -35,8 +38,13 @@ static char *trim(char *s)
 
 static void status(const char *msg, int ok)
 {
-    dprintf(STDERR_FILENO, " * %s ... [%s%s%s]\n",
-            msg, ok ? COL_GRN : COL_RED, ok ? "ok" : "!!", COL_RST);
+    fprintf(stderr, COL_GRN " *" COL_RST " %s ...\033[%dG[ %s%s" COL_RST " ]\n",
+            msg, STATUS_COL, ok ? COL_GRN : COL_RED, ok ? "ok" : "!!");
+}
+
+static void info(const char *msg)
+{
+    fprintf(stderr, "%s\n", msg);
 }
 
 static void spawn(struct service *svc)
@@ -69,8 +77,7 @@ static void read_rc_conf(void)
             char *end = strchr(p + 1, ']');
             if (!end) continue;
             *end = '\0';
-            const char *sec = p + 1;
-            in_services = (strcmp(sec, "services") == 0);
+            in_services = (strcmp(p + 1, "services") == 0);
             continue;
         }
         if (!in_services || nservices >= MAX_SERVICES)
@@ -113,17 +120,36 @@ int main(void)
     }
 
     signal(SIGCHLD, SIG_IGN);
-    signal(SIGINT, SIG_IGN);
+    signal(SIGINT,  SIG_IGN);
 
-    setenv("PATH", "/bin:/sbin", 1);
-    setenv("HOME", "/", 1);
-    setenv("SHELL", "/bin/ksh", 1);
-    setenv("TERM", "vt100", 1);
+    setenv("PATH",  "/bin:/sbin", 1);
+    setenv("HOME",  "/",          1);
+    setenv("SHELL", "/bin/ksh",   1);
+    setenv("TERM",  "vt100",      1);
 
+    fprintf(stderr, COL_BOLD "KyronixOS" COL_RST
+            " is starting up " COL_GRN "kyronixos-0.0.1 (x86_64)" COL_RST "\n\n");
+
+    status("Mounting /proc",        1);
+    status("Mounting /sys",         1);
+    status("Mounting /dev/pts",     1);
+    status("Setting hostname",      1);
+    status("Loading sysctl values", 1);
+
+    fprintf(stderr, "\n");
     read_rc_conf();
+    fprintf(stderr, "\n");
 
-    for (int i = 0; i < nservices; i++)
+    info("INIT: Entering runlevel: 2");
+
+    for (int i = 0; i < nservices; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Starting %s", services[i].name);
         spawn(&services[i]);
+        status(buf, 1);
+    }
+
+    fprintf(stderr, "\n");
 
     for (;;)
         pause();

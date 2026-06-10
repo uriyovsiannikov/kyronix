@@ -16,7 +16,6 @@
 #define KSTACK_PAGES 8
 #define KSTACK_SIZE (KSTACK_PAGES * 4096ULL)
 
-/* field offsets used in sched.S — must stay in sync */
 typedef struct proc
 {
     int state;                       /*  0 */

@@ -109,6 +109,7 @@ typedef struct
     int flags;
     pipe_t* pipe;
     int pipe_end; /* PIPE_END_READ or PIPE_END_WRITE */
+    pipe_t* wpipe; /* non-NULL for socket fds: separate write-direction pipe */
 } vfs_file_t;
 
 #define VFS_FD_MAX 1024
@@ -137,9 +138,11 @@ int fd_fcntl(int fd, int cmd, uint64_t arg);
 int fd_dup(int oldfd);
 int fd_dup2(int oldfd, int newfd);
 bool fd_valid(int fd);
+vfs_node_t* fd_get_node(int fd);
 bool fd_pollin(int fd);
 bool fd_pollout(int fd);
 int fd_pipe(int pipefd[2]);
+int fd_socketpair(int sv[2]);
 
 vfs_node_t* vfs_lookup(const char* path);
 vfs_node_t* vfs_lookup_nofollow(const char* path);

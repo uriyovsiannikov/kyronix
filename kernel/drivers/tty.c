@@ -185,8 +185,19 @@ int64_t tty_read(char* buf, uint64_t len)
         if (i >= vmin)
             break;
 
-        if (g_current_proc && (g_current_proc->pending_sigs & ~g_current_proc->sig_mask))
-            return -(int64_t) EINTR;
+        if (g_current_proc)
+        {
+            uint64_t actionable = g_current_proc->pending_sigs & ~g_current_proc->sig_mask;
+            while (actionable)
+            {
+                int idx = __builtin_ctzll(actionable);
+                actionable &= ~(1ULL << idx);
+                if (g_current_proc->sig_actions[idx].sa_handler != SIG_IGN)
+                    return -(int64_t) EINTR;
+                /* signal is ignored — consume it and keep reading */
+                g_current_proc->pending_sigs &= ~(1ULL << idx);
+            }
+        }
 
         sched_yield_blocking();
         cpu_relax();
