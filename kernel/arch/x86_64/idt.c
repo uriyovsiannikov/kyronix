@@ -1,8 +1,14 @@
 #include "idt.h"
 #include "gdt.h"
 #include "lib/printf.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "pic.h"
+#include "pit.h"
+#include "arch/x86_64/syscall_setup.h"
+#include "fs/vfs.h"
 #include "proc/proc.h"
+#include "syscall/syscall.h"
 
 #define IDT_INT_GATE 0x8E
 #define IDT_TRAP_GATE 0x8F
@@ -92,6 +98,21 @@ void isr_dispatch(cpu_state_t* state)
 
     if (n < 32)
     {
+        /* demand paging: allocate a page for non-present user-space access */
+        if (n == 14 && g_current_proc && (state->cs & 3) == 3 && !(state->error_code & 0x1))
+        {
+            uint64_t cr2 = read_cr2();
+            uint64_t page = cr2 & ~0xFFFULL;
+            if (page >= 0x400000ULL)
+            {
+                void* phys = pmm_alloc_zeroed();
+                if (phys && vmm_map(g_current_proc->space, page, (uint64_t) phys, VMM_UDATA) == 0)
+                    return;
+                if (phys)
+                    pmm_free(phys);
+            }
+        }
+
         kprintf("\n\n!!! KERNEL EXCEPTION !!! pid=%u\n", g_current_proc ? g_current_proc->pid : 0);
         kprintf("  %s  (vector %lu)\n", exc_name[n], n);
         kprintf("  error = 0x%016lx\n", state->error_code);
@@ -107,9 +128,8 @@ void isr_dispatch(cpu_state_t* state)
         kprintf("  RBP   = 0x%016lx\n", state->rbp);
 
         if (n == 14)
-        { /* page fault: CR2 = faulting address */
-            uint64_t cr2;
-            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        {
+            uint64_t cr2 = read_cr2();
             kprintf("  CR2   = 0x%016lx  (fault address)\n", cr2);
             kprintf("  PF flags: %s%s%s%s%s\n", state->error_code & 1 ? "present " : "non-present ",
                     state->error_code & 2 ? "write " : "read ",
@@ -118,7 +138,6 @@ void isr_dispatch(cpu_state_t* state)
                     state->error_code & 16 ? "ifetch" : "");
         }
 
-        /* rsp/ss are only valid if we came from ring 3 */
         if ((state->cs & 3) == 3)
             kprintf("  RSP   = 0x%016lx   SS     = 0x%04lx  (ring-3)\n", state->rsp, state->ss);
 
@@ -126,6 +145,41 @@ void isr_dispatch(cpu_state_t* state)
     }
     else if (n < 48)
     {
-        pic_send_eoi((uint8_t) (n - 32));
+        uint8_t irq = (uint8_t) (n - 32);
+        if (irq == 0)
+        {
+            g_ticks++;
+            pic_send_eoi(0);
+            for (int i = 0; i < PROC_MAX; i++) {
+                proc_t* pc = &g_proctable[i];
+                if (pc->wakeup_tick && g_ticks >= pc->wakeup_tick) {
+                    pc->wakeup_tick = 0;
+                    if (pc->state == PROC_WAITING)
+                        pc->state = PROC_READY;
+                }
+            }
+            if ((state->cs & 3) == 3 && g_current_proc)
+            {
+                proc_t* p = g_current_proc;
+                proc_t* next = proc_next_ready(p);
+                if (next)
+                {
+                    p->state = PROC_READY;
+                    next->state = PROC_RUNNING;
+                    vfs_set_fdtable(next->fds);
+                    g_current_space = next->space;
+                    cpu_set_kernel_stack(next->kstack_top);
+                    sched_switch(next);
+                    p->state = PROC_RUNNING;
+                    vfs_set_fdtable(p->fds);
+                    g_current_space = p->space;
+                    cpu_set_kernel_stack(p->kstack_top);
+                }
+            }
+        }
+        else
+        {
+            pic_send_eoi(irq);
+        }
     }
 }

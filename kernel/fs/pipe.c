@@ -41,8 +41,10 @@ int64_t pipe_read(pipe_t* p, void* buf, uint64_t len)
 
 int64_t pipe_write(pipe_t* p, const void* buf, uint64_t len)
 {
-    if (p->read_refs == 0)
+    if (p->read_refs == 0) {
+        proc_send_signal(g_current_proc, SIGPIPE);
         return -(int64_t) EPIPE;
+    }
     if (len == 0)
         return 0;
 

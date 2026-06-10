@@ -41,6 +41,7 @@ SRCS := \
     kernel/kernel.c                    \
     kernel/arch/x86_64/gdt.c          \
     kernel/arch/x86_64/idt.c          \
+    kernel/arch/x86_64/pit.c          \
     kernel/mm/pmm.c                   \
     kernel/mm/vmm.c                   \
     kernel/mm/heap.c                  \
@@ -64,7 +65,8 @@ SRCS := \
 ASM_SRCS := \
     kernel/arch/x86_64/idt_stubs.S    \
     kernel/arch/x86_64/syscall_entry.S \
-    kernel/proc/sched.S
+    kernel/proc/sched.S                \
+    kernel/drivers/psf_font.S
 
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o) $(ASM_SRCS:%.S=$(BUILD_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)

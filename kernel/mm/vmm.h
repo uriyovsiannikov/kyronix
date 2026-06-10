@@ -25,6 +25,7 @@ extern vmm_space_t g_kernel_space;
 void vmm_init(void);
 int vmm_map(vmm_space_t* sp, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap(vmm_space_t* sp, uint64_t virt);
+uint64_t vmm_virt_to_phys(vmm_space_t* sp, uint64_t virt);
 vmm_space_t* vmm_space_new(void);
 void vmm_space_free(vmm_space_t* sp);
 void vmm_switch(vmm_space_t* sp);

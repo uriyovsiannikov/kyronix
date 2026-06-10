@@ -65,6 +65,23 @@ int vmm_map(vmm_space_t* sp, uint64_t virt, uint64_t phys, uint64_t flags)
     return 0;
 }
 
+uint64_t vmm_virt_to_phys(vmm_space_t* sp, uint64_t virt)
+{
+    uint64_t* pml4 = (uint64_t*) phys_to_virt(sp->pml4_phys);
+    if (!(pml4[PML4_IDX(virt)] & VMM_PRESENT))
+        return 0;
+    uint64_t* pdpt = (uint64_t*) phys_to_virt(pte_addr(pml4[PML4_IDX(virt)]));
+    if (!(pdpt[PDPT_IDX(virt)] & VMM_PRESENT))
+        return 0;
+    uint64_t* pd = (uint64_t*) phys_to_virt(pte_addr(pdpt[PDPT_IDX(virt)]));
+    if (!(pd[PD_IDX(virt)] & VMM_PRESENT))
+        return 0;
+    uint64_t* pt = (uint64_t*) phys_to_virt(pte_addr(pd[PD_IDX(virt)]));
+    if (!(pt[PT_IDX(virt)] & VMM_PRESENT))
+        return 0;
+    return pte_addr(pt[PT_IDX(virt)]);
+}
+
 void vmm_unmap(vmm_space_t* sp, uint64_t virt)
 {
     uint64_t* pml4 = (uint64_t*) phys_to_virt(sp->pml4_phys);

@@ -5,6 +5,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
+#include "arch/x86_64/pit.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "boot/limine.h"
 #include "drivers/fb.h"
@@ -146,6 +147,8 @@ void kmain(void)
     syscall_init();
     proc_init();
     vfs_init();
+    pit_init();
+    sti();
 
     if (!fb_req.response || fb_req.response->framebuffer_count < 1)
         cpu_halt();

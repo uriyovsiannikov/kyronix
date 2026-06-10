@@ -148,3 +148,8 @@ vfs_node_t* vfs_create_file(const char* path, uint32_t mode, const void* data, u
 vfs_node_t* vfs_create_symlink(const char* path, const char* target);
 vfs_node_t* vfs_create_chr(const char* path, int64_t (*rfn)(vfs_node_t*, char*, uint64_t, uint64_t),
                            int64_t (*wfn)(vfs_node_t*, const char*, uint64_t));
+
+int vfs_mkdir(const char* path, uint32_t mode);
+int vfs_unlink(const char* path);
+int vfs_rmdir(const char* path);
+int vfs_rename(const char* oldpath, const char* newpath);

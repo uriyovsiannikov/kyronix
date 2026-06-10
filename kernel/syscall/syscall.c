@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/pit.h"
 #include "arch/x86_64/syscall_setup.h"
 #include "exec/elf.h"
 #include "exec/process.h"
@@ -111,7 +112,12 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
     if (!p)
         return -(int64_t) EINVAL;
     for (uint64_t o = 0; o < PAGE_ALIGN_UP(len); o += PAGE_SIZE)
+    {
+        uint64_t phys = vmm_virt_to_phys(p->space, addr + o);
         vmm_unmap(p->space, addr + o);
+        if (phys)
+            pmm_free((void*) phys);
+    }
     return 0;
 }
 
@@ -152,6 +158,8 @@ static int64_t sys_fork(syscall_frame_t* f)
     memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
     child->pending_sigs = 0;
     child->fs_base = parent->fs_base;
+    memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+    memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
 
     uint8_t* ksp = child->kstack + KSTACK_SIZE;
 
@@ -181,6 +189,23 @@ fail_space:
     return -(int64_t) ENOMEM;
 }
 
+static void path_abs(char* out, const char* in)
+{
+    if (!in || in[0] == '/') {
+        strncpy(out, in ? in : "", 511);
+        out[511] = '\0';
+        return;
+    }
+    proc_t* p = cur();
+    const char* cwd = (p && p->cwd[0]) ? p->cwd : "/";
+    size_t cl = strlen(cwd);
+    if (cl >= 511) { out[0] = '/'; out[1] = '\0'; return; }
+    memcpy(out, cwd, cl);
+    if (out[cl - 1] != '/') out[cl++] = '/';
+    strncpy(out + cl, in, 511 - cl);
+    out[511] = '\0';
+}
+
 #define MAX_EXEC_ARGS 32
 
 static int64_t sys_execve(const char* path, const char** uargv, const char** uenvp)
@@ -188,8 +213,60 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
     if (!path)
         return -(int64_t) EFAULT;
 
-    /* Copy argv/envp strings from user space to kernel heap BEFORE switching
-     * address spaces. The old user space stays mapped until vmm_switch.     */
+    char abs[512];
+    path_abs(abs, path);
+    const char* exec_path = abs[0] ? abs : path;
+
+    vfs_node_t* node = vfs_lookup(exec_path);
+    if (!node || node->type != VFS_TYPE_REG || !node->data)
+        return -(int64_t) ENOENT;
+
+    char shebang_interp[512] = {0};
+    char shebang_arg[256] = {0};
+    char script_path[512] = {0};
+    bool is_shebang = false;
+
+    if (node->size >= 2 && node->data[0] == '#' && node->data[1] == '!')
+    {
+        char line[256];
+        size_t ll = 0;
+        while (ll < 254 && 2 + ll < node->size)
+        {
+            char ch = (char) node->data[2 + ll];
+            if (ch == '\n' || ch == '\r')
+                break;
+            line[ll++] = ch;
+        }
+        line[ll] = '\0';
+        char* p2 = line;
+        while (*p2 == ' ' || *p2 == '\t')
+            p2++;
+        if (!*p2)
+            return -(int64_t) ENOEXEC;
+        char* istart = p2;
+        while (*p2 && *p2 != ' ' && *p2 != '\t')
+            p2++;
+        size_t ilen = (size_t) (p2 - istart);
+        if (!ilen || ilen >= sizeof(shebang_interp))
+            return -(int64_t) ENOEXEC;
+        memcpy(shebang_interp, istart, ilen);
+        while (*p2 == ' ' || *p2 == '\t')
+            p2++;
+        if (*p2)
+        {
+            strncpy(shebang_arg, p2, sizeof(shebang_arg) - 1);
+            char* e = shebang_arg + strlen(shebang_arg) - 1;
+            while (e >= shebang_arg && (*e == ' ' || *e == '\t' || *e == '\r'))
+                *e-- = '\0';
+        }
+        strncpy(script_path, exec_path, sizeof(script_path) - 1);
+        node = vfs_lookup(shebang_interp);
+        if (!node || node->type != VFS_TYPE_REG || !node->data)
+            return -(int64_t) ENOENT;
+        exec_path = shebang_interp;
+        is_shebang = true;
+    }
+
     char* argv_mem[MAX_EXEC_ARGS] = {0};
     char* envp_mem[MAX_EXEC_ARGS] = {0};
     const char* kargv[MAX_EXEC_ARGS + 1];
@@ -214,34 +291,59 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
         }                                                                                          \
     } while (0)
 
-    if (uargv)
+    if (is_shebang)
     {
-        while (argc < MAX_EXEC_ARGS && uargv[argc])
+        kargv[argc++] = shebang_interp;
+        if (shebang_arg[0])
+            kargv[argc++] = shebang_arg;
+        kargv[argc++] = script_path;
+        int ui = 1;
+        while (argc < MAX_EXEC_ARGS && uargv && uargv[ui])
         {
-            size_t n = strlen(uargv[argc]) + 1;
+            size_t n = strlen(uargv[ui]) + 1;
             argv_mem[argc] = kmalloc(n);
             if (!argv_mem[argc])
             {
                 FREE_EXEC_STRS();
                 return -(int64_t) ENOMEM;
             }
-            memcpy(argv_mem[argc], uargv[argc], n);
+            memcpy(argv_mem[argc], uargv[ui], n);
             kargv[argc] = argv_mem[argc];
             argc++;
+            ui++;
         }
     }
-    if (argc == 0)
+    else
     {
-        size_t n = strlen(path) + 1;
-        argv_mem[0] = kmalloc(n);
-        if (!argv_mem[0])
+        if (uargv)
         {
-            FREE_EXEC_STRS();
-            return -(int64_t) ENOMEM;
+            while (argc < MAX_EXEC_ARGS && uargv[argc])
+            {
+                size_t n = strlen(uargv[argc]) + 1;
+                argv_mem[argc] = kmalloc(n);
+                if (!argv_mem[argc])
+                {
+                    FREE_EXEC_STRS();
+                    return -(int64_t) ENOMEM;
+                }
+                memcpy(argv_mem[argc], uargv[argc], n);
+                kargv[argc] = argv_mem[argc];
+                argc++;
+            }
         }
-        memcpy(argv_mem[0], path, n);
-        kargv[0] = argv_mem[0];
-        argc = 1;
+        if (argc == 0)
+        {
+            size_t n = strlen(exec_path) + 1;
+            argv_mem[0] = kmalloc(n);
+            if (!argv_mem[0])
+            {
+                FREE_EXEC_STRS();
+                return -(int64_t) ENOMEM;
+            }
+            memcpy(argv_mem[0], exec_path, n);
+            kargv[0] = argv_mem[0];
+            argc = 1;
+        }
     }
     kargv[argc] = NULL;
 
@@ -262,13 +364,6 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
         }
     }
     kenvp[envc] = NULL;
-
-    vfs_node_t* node = vfs_lookup(path);
-    if (!node || node->type != VFS_TYPE_REG || !node->data)
-    {
-        FREE_EXEC_STRS();
-        return -(int64_t) ENOENT;
-    }
 
     elf_load_result_t res;
     if (elf_load(node->data, node->size, &res) < 0)
@@ -294,6 +389,7 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
     p->brk = PAGE_ALIGN_UP(res.brk);
     p->brk_base = p->brk;
     p->mmap_bump = 0x0000500000000000ULL;
+    strncpy(p->exe_path, exec_path, sizeof(p->exe_path) - 1);
     g_current_space = p->space;
 
     vmm_switch(p->space);
@@ -452,10 +548,12 @@ static int64_t sys_getcwd(char* buf, uint64_t size)
 {
     if (!buf || !size)
         return -(int64_t) EINVAL;
-    size_t len = strlen(g_cwd) + 1;
+    proc_t* p = cur();
+    const char* cwd = p ? p->cwd : g_cwd;
+    size_t len = strlen(cwd) + 1;
     if (len > size)
         return -(int64_t) EINVAL;
-    memcpy(buf, g_cwd, len);
+    memcpy(buf, cwd, len);
     return (int64_t) (uintptr_t) buf;
 }
 
@@ -468,7 +566,9 @@ static int64_t sys_chdir(const char* path)
         return -(int64_t) ENOENT;
     if (n->type != VFS_TYPE_DIR)
         return -(int64_t) ENOTDIR;
-    strncpy(g_cwd, path, sizeof(g_cwd) - 1);
+    proc_t* p = cur();
+    if (p)
+        strncpy(p->cwd, path, sizeof(p->cwd) - 1);
     return 0;
 }
 
@@ -721,10 +821,62 @@ static int64_t sys_pause(void)
 
 static int64_t sys_nanosleep(void* r, void* m)
 {
-    (void) r;
     (void) m;
+    if (!r) return 0;
+    uint64_t sec = ((uint64_t*) r)[0];
+    uint64_t nsec = ((uint64_t*) r)[1];
+    uint64_t ms = sec * 1000 + nsec / 1000000;
+    if (ms == 0) return 0;
+    proc_t* p = cur();
+    if (!p) return 0;
+    uint64_t deadline = g_ticks + ms;
+    p->wakeup_tick = deadline;
+    while (g_ticks < deadline) {
+        if (proc_next_ready(p))
+            sched_yield_blocking();
+        else {
+            sti();
+            hlt();
+            cli();
+        }
+    }
+    p->wakeup_tick = 0;
     return 0;
 }
+
+static int64_t sys_mkdir(const char* path, uint32_t mode)
+{
+    if (!path) return -(int64_t) EINVAL;
+    char abs[512];
+    path_abs(abs, path);
+    return (int64_t) vfs_mkdir(abs, mode);
+}
+
+static int64_t sys_rmdir(const char* path)
+{
+    if (!path) return -(int64_t) EINVAL;
+    char abs[512];
+    path_abs(abs, path);
+    return (int64_t) vfs_rmdir(abs);
+}
+
+static int64_t sys_unlink(const char* path)
+{
+    if (!path) return -(int64_t) EINVAL;
+    char abs[512];
+    path_abs(abs, path);
+    return (int64_t) vfs_unlink(abs);
+}
+
+static int64_t sys_rename(const char* oldpath, const char* newpath)
+{
+    if (!oldpath || !newpath) return -(int64_t) EINVAL;
+    char abs_old[512], abs_new[512];
+    path_abs(abs_old, oldpath);
+    path_abs(abs_new, newpath);
+    return (int64_t) vfs_rename(abs_old, abs_new);
+}
+
 static int64_t sys_set_tid_address(void* p)
 {
     (void) p;
@@ -762,14 +914,56 @@ static int64_t sys_futex(uint32_t* uaddr, int op, uint32_t val, void* timeout, u
     }
 }
 
+static int rdrand_supported(void)
+{
+    uint32_t ecx;
+    __asm__ volatile("cpuid" : "=c"(ecx) : "a"(1) : "ebx", "edx", "memory");
+    return (int) ((ecx >> 30) & 1);
+}
+
 static int64_t sys_getrandom(void* buf, uint64_t len, uint32_t flags)
 {
     (void) flags;
     if (!buf || !len)
         return 0;
+
+    static int rdrand_ok = -1;
+    if (rdrand_ok < 0)
+        rdrand_ok = rdrand_supported();
+
     uint8_t* p = (uint8_t*) buf;
-    for (uint64_t i = 0; i < len; i++)
-        p[i] = (uint8_t) (0x53 ^ (i * 0x6b + 0x37));
+    uint64_t i = 0;
+
+    if (rdrand_ok)
+    {
+        while (i + 8 <= len)
+        {
+            uint64_t v;
+            __asm__ volatile("1: rdrand %0; jnc 1b" : "=r"(v) :: "cc");
+            __builtin_memcpy(p + i, &v, 8);
+            i += 8;
+        }
+        if (i < len)
+        {
+            uint64_t v;
+            __asm__ volatile("1: rdrand %0; jnc 1b" : "=r"(v) :: "cc");
+            __builtin_memcpy(p + i, &v, len - i);
+        }
+    }
+    else
+    {
+        /* TSC + g_ticks xorshift64 fallback */
+        uint32_t lo, hi;
+        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        uint64_t seed = ((uint64_t) hi << 32 | lo) ^ g_ticks;
+        for (; i < len; i++)
+        {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            p[i] = (uint8_t) seed;
+        }
+    }
     return (int64_t) len;
 }
 
@@ -807,68 +1001,24 @@ struct pollfd_s
     short events;
     short revents;
 };
-
-#define POLLIN 1
-#define POLLOUT 4
-
 static int64_t sys_poll(struct pollfd_s* fds, uint64_t nfds, int timeout)
 {
-    uint64_t iterations = 0;
-    /* very rough: ~1ms per yield+relax */
-    uint64_t max_iterations = (timeout < 0) ? UINT64_MAX
-                            : (uint64_t) (timeout > 0 ? timeout : 0);
-
-    for (;;)
+    (void) timeout;
+    if (fds)
     {
-        uint64_t ready = 0;
         for (uint64_t i = 0; i < nfds; i++)
-        {
-            fds[i].revents = 0;
-
-            if (fds[i].events & POLLIN)
-            {
-                if (fds[i].fd < 0 || fd_pollin(fds[i].fd))
-                    fds[i].revents |= POLLIN;
-            }
-            if (fds[i].events & POLLOUT)
-            {
-                if (fds[i].fd < 0 || fd_pollout(fds[i].fd))
-                    fds[i].revents |= POLLOUT;
-            }
-
-            if (fds[i].revents)
-                ready++;
-        }
-
-        if (ready > 0)
-            return (int64_t) ready;
-
-        if (timeout == 0)
-            return 0;
-
-        iterations++;
-        if (iterations >= max_iterations)
-            return 0;
-
-        if (g_current_proc && (g_current_proc->pending_sigs & ~g_current_proc->sig_mask))
-            return -(int64_t) EINTR;
-
-        sched_yield_blocking();
-        cpu_relax();
+            fds[i].revents = fds[i].events;
     }
+    return (int64_t) nfds;
 }
 
 static int64_t sys_ppoll(struct pollfd_s* fds, uint64_t nfds, void* tmo, const void* sigmask,
                          uint64_t sigsetsize)
 {
-    int timeout = -1;
-    if (tmo)
-    {
-        /* timespec: sec + nsec -> convert to ms */
-        uint64_t* ts = (uint64_t*) tmo;
-        timeout = (int)(ts[0] * 1000 + ts[1] / 1000000);
-    }
-    return sys_poll(fds, nfds, timeout);
+    (void) tmo;
+    (void) sigmask;
+    (void) sigsetsize;
+    return sys_poll(fds, nfds, 0);
 }
 
 static int64_t sys_select(int nfds, void* rfds, void* wfds, void* efds, void* timeout)
@@ -957,8 +1107,9 @@ static int64_t sys_clock_gettime(uint64_t c, void* t)
     (void) c;
     if (t)
     {
-        ((uint64_t*) t)[0] = 0;
-        ((uint64_t*) t)[1] = 0;
+        uint64_t ms = g_ticks;
+        ((uint64_t*) t)[0] = ms / 1000;
+        ((uint64_t*) t)[1] = (ms % 1000) * 1000000ULL;
     }
     return 0;
 }
@@ -968,8 +1119,9 @@ static int64_t sys_gettimeofday(void* tv, void* tz)
     (void) tz;
     if (tv)
     {
-        ((uint64_t*) tv)[0] = 0;
-        ((uint64_t*) tv)[1] = 0;
+        uint64_t ms = g_ticks;
+        ((uint64_t*) tv)[0] = ms / 1000;
+        ((uint64_t*) tv)[1] = (ms % 1000) * 1000ULL;
     }
     return 0;
 }
@@ -1168,6 +1320,18 @@ void syscall_dispatch(syscall_frame_t* f)
     case 80:
         ret = sys_chdir((const char*) a1);
         break;
+    case 82:
+        ret = sys_rename((const char*) a1, (const char*) a2);
+        break;
+    case 83:
+        ret = sys_mkdir((const char*) a1, (uint32_t) a2);
+        break;
+    case 84:
+        ret = sys_rmdir((const char*) a1);
+        break;
+    case 87:
+        ret = sys_unlink((const char*) a1);
+        break;
     case 89:
         ret = fd_readlink((const char*) a1, (char*) a2, a3);
         break;
@@ -1265,8 +1429,17 @@ void syscall_dispatch(syscall_frame_t* f)
     case 257:
         ret = fd_openat((int) a1, (const char*) a2, (int) a3, (int) a4);
         break;
+    case 258:
+        ret = sys_mkdir((const char*) a2, (uint32_t) a3);
+        break;
     case 262:
         ret = fd_fstatat((int) a1, (const char*) a2, (struct linux_stat*) a3, (int) a4);
+        break;
+    case 263:
+        if ((int) a3 & 0x200)
+            ret = sys_rmdir((const char*) a2);
+        else
+            ret = sys_unlink((const char*) a2);
         break;
     case 270:
         ret = sys_pselect6((int) a1, (void*) a2, (void*) a3, (void*) a4, (void*) a5, (void*) a6);

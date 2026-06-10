@@ -35,9 +35,12 @@ typedef struct proc
     uint64_t mmap_bump;              /* 80 */
     uint64_t fs_base;                /* 88 */
     vfs_file_t** fds;                /* 96 */
-    uint64_t pending_sigs;           /* 96  — bit k-1 = signal k pending */
-    uint64_t sig_mask;               /* 104 */
-    k_sigaction_t sig_actions[NSIG]; /* 112 — per-signal handler/flags/restorer */
+    uint64_t pending_sigs;
+    uint64_t sig_mask;
+    k_sigaction_t sig_actions[NSIG];
+    char cwd[512];
+    uint64_t wakeup_tick;
+    char exe_path[512];
 } proc_t;
 
 extern proc_t g_proctable[PROC_MAX];
@@ -46,6 +49,7 @@ extern proc_t* g_current_proc;
 void proc_init(void);
 proc_t* proc_alloc(uint32_t ppid);
 proc_t* proc_find(uint32_t pid);
+proc_t* proc_next_ready(proc_t* skip);
 void sched_switch(proc_t* next);
 void sched_yield_blocking(void);
 extern void proc_resume_frame(void);

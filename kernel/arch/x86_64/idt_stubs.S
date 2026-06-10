@@ -90,6 +90,12 @@ isr_stub_table:
 
 .section .text
 isr_common:
+    /* CS is at RSP+24 (after dummy+num, before iretq frame: RIP/CS/RFLAGS/RSP/SS) */
+    testb   $3, 24(%rsp)
+    jz      .Lno_swapgs_in
+    swapgs
+.Lno_swapgs_in:
+
     pushq   %rax
     pushq   %rbx
     pushq   %rcx
@@ -106,7 +112,7 @@ isr_common:
     pushq   %r14
     pushq   %r15
 
-    movq    %rsp, %rdi          /* arg0 = cpu_state_t * */
+    movq    %rsp, %rdi
     call    isr_dispatch
 
     popq    %r15
@@ -125,5 +131,11 @@ isr_common:
     popq    %rbx
     popq    %rax
 
-    addq    $16, %rsp           /* discard int_no + error_code */
+    /* same layout: CS still at RSP+24 */
+    testb   $3, 24(%rsp)
+    jz      .Lno_swapgs_out
+    swapgs
+.Lno_swapgs_out:
+
+    addq    $16, %rsp
     iretq

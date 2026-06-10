@@ -1,120 +1,177 @@
 # Kyronix — roadmap
 
-Target: x86-64 kernel that can run statically linked userspace binaries
-via POSIX syscalls.
+Target: Linux-compatible x86-64 OS — statically and dynamically linked ELF binaries,
+POSIX syscalls, real filesystem, networking.
 
-- [ ] = not done
-- [x] = done
+`[x]` = done · `[~]` = partial/stub · `[ ]` = not started
 
 ---
 
-## Phase 1 — Segments & interrupts
+## Реализовано (база)
 
-- [x] GDT: null, kernel code/data (ring 0), user code/data (ring 3), TSS
-- [x] IDT: 256 vectors, load with `lidt`
-- [x] ISR dispatch: asm wrapper → `cpu_state_t` → C handler table
-- [x] PIC 8259: remap master (0x20) / slave (0x28), mask all
-- [x] Exception stubs: #PF, #GP, #DE, #SS — log + halt
+- [x] GDT / IDT / TSS / PIC 8259 ремап
+- [x] PMM (bitmap + free-stack), VMM (4-уровневый PT, NX, HHDM), heap
+- [x] Demand paging — #PF handler выделяет страницу на лету (стек растёт автоматически)
+- [x] PIT ~1000 Hz → g_ticks → вытесняющий планировщик (IRQ0)
+- [x] SYSCALL/SYSRET + swapgs, TSS.rsp0, SSE
+- [x] ELF64 загрузчик + argv/envp/auxv стек
+- [x] fork / execve / wait4 / exit / exit_group
+- [x] Кооперативный + вытесняющий планировщик
+- [x] Сигналы: rt_sigaction, rt_sigreturn, kill, SIGCHLD
+- [x] VFS ramfs + CPIO initrd, symlinks, chr-dev
+- [x] /dev/tty, /dev/null, /dev/zero, /dev/stdin/stdout/stderr
+- [x] pipe / pipe2, dup / dup2
+- [x] 65+ syscall
+- [x] Per-process cwd, chdir/getcwd
+- [x] clock_gettime / gettimeofday (реальные ms с boot)
+- [x] sbase утилиты + ksh shell
 
-## Phase 2 — Memory management
+---
 
-- [x] PMM: bitmap + free-stack frame allocator
-- [x] VMM: map/unmap, page alloc, higher-half takeover from Limine
-- [x] Heap: `kmalloc`/`kfree` on top of page allocator
+## P0 — Без этого ломается базовый shell (следующий спринт)
 
-## Phase 3 — Timer
+### VFS: запись и мутация файлов
+- [ ] `O_CREAT` / `O_TRUNC` — создание и перезапись файлов в ramfs
+- [ ] `write()` в существующий файл (сейчас только chr-dev пишут)
+- [ ] `unlink()` / `rmdir()` — удаление
+- [ ] `mkdir()` — syscall 83 (сейчас нет)
+- [ ] `rename()` — syscall 82
+- [ ] Shell-редиректы `>` `>>` без этого не работают
 
-- [ ] PIT at 1000 Hz (or HPET)
-- [ ] IRQ0 → tick counter → scheduler entry
-- [ ] (WIP) `sleep()` / `block_for()` primitives (nanosleep stub only)
+### nanosleep с реальным ожиданием
+- [ ] Поле `wakeup_tick` в proc_t
+- [ ] В sys_nanosleep: записать wakeup_tick = g_ticks + ms, перейти в PROC_WAITING
+- [ ] В IRQ0: пробуждать процессы у которых wakeup_tick <= g_ticks
+- [ ] Нужно для: `sleep 1`, таймаутов в shell, любых busy-wait замен
 
-## Phase 4 — Scheduler & kernel threads
+### SIGPIPE
+- [ ] В pipe_write: если read_refs == 0 → доставить SIGPIPE писателю
+- [ ] Сейчас pipe-команды зависают вместо завершения
 
-- [x] `struct proc` (regs, stack, state, page table pointer)
-- [x] Context switch (callee-saved regs, RSP, CR3)
-- [x] Cooperative `sched_yield_blocking()`
-- [ ] Preemptive scheduler (timer IRQ)
-- [ ] Kernel threads
+---
 
-## Phase 5 — Userspace & syscall entry
+## P1 — Нужно для запуска реального userspace (musl, busybox)
 
-- [x] `sysretq` to ring 3 (user SS/RSP/RFLAGS/CS/RIP on stack)
-- [x] User page tables (U/S bit)
-- [x] `syscall`/`sysret` MSRs (STAR, LSTAR, SF_MASK)
-- [x] Syscall dispatch table (RAX → handler, 60+ syscalls)
-- [x] SSE context restore on syscall entry/exit
+### /proc псевдофайловая система
+- [ ] `/proc/self/exe` → symlink на исполняемый файл процесса
+- [ ] `/proc/self/fd/N` → symlink на открытый fd
+- [ ] `/proc/self/maps` → карта памяти (нужна gdb, sanitizers)
+- [ ] `/proc/PID/` → базовые файлы (status, cmdline)
+- [ ] `/proc/version`, `/proc/cpuinfo`, `/proc/meminfo`
+- [ ] Реализация: chr-dev с динамической генерацией содержимого
 
-## Phase 6 — ELF loader
+### shebang (#!) в execve
+- [ ] Парсить первые 2 байта: если `#!` — прочитать интерпретатор и перезапустить
+- [ ] Нужен для: `#!/bin/sh`, `#!/usr/bin/env python`
 
-- [x] ELF64 parser (magic, program headers, segment mapping)
-- [x] `process_exec`: buffer → VMM mappings → ring 3 entry
-- [x] User stack setup with argv/envp/aux vectors
-- [x] Test binary (`user/init.S`) run as `/init`
+### Настоящий getrandom
+- [ ] RDRAND инструкция x86 (CPUID проверка)
+- [ ] Fallback: XORshift на основе TSC + g_ticks если нет RDRAND
+- [ ] musl libc инициализирует arc4random через getrandom
 
-## Phase 7 — VFS & initramfs
+### futex (реальная блокировка)
+- [ ] Список ожидания по адресу (futex_wait_queue)
+- [ ] FUTEX_WAIT: если *uaddr == val → добавить в очередь, переключить контекст
+- [ ] FUTEX_WAKE: разбудить N процессов из очереди
+- [ ] Нужен для: любой многопоточной программы, musl mutex
 
-- [x] `struct vfs_node`, `struct vfs_file`, chr-dev callbacks
-- [ ] Mount table (single ramfs root only)
-- [x] initramfs: embedded cpio (newc format) → ramfs root
-- [x] Device nodes: `/dev/null`, `/dev/zero`, `/dev/tty`, `/dev/fd`
-- [x] `/dev/stdin`, `/dev/stdout`, `/dev/stderr`
+### mmap file-backed (MAP_SHARED / MAP_PRIVATE)
+- [ ] `mmap(fd, offset, len)` — отобразить содержимое файла в память
+- [ ] Нужен для: динамический линкёр, `dlopen`, большинство больших программ
 
-## Phase 8 — POSIX syscalls
+---
 
-### Process control
-- [x] `exit` / `exit_group`
-- [x] `fork` (full address space clone)
-- [x] `execve` (ELF load + argv/envp)
-- [x] `wait4` (blocking child reaping)
-- [x] `getpid` / `getppid` / `getpgrp` / `setsid`
+## P2 — Для запуска динамически слинкованных программ
 
-### File I/O
-- [x] `open` / `openat`
-- [x] `close`
-- [x] `read` / `write` / `pread64`
-- [x] `lseek`
-- [x] `dup` / `dup2` / `dup3`
-- [x] `fcntl`
-- [x] `ioctl` (TIOCGWINSZ, TCGETS/TCSETS, TIOCGPGRP/SPGRP)
-- [x] `pipe` / `pipe2`
-- [x] `stat` / `fstat` / `lstat`
-- [x] `getdents64`
-- [x] `readlink`
-- [x] `chdir` / `getcwd`
+### Динамический линкёр
+- [ ] Поддержка `PT_INTERP` в ELF — загружать ld.so
+- [ ] `AT_BASE` в auxv — база линкёра
+- [ ] Нужна поддержка mmap file-backed (P1)
+- [ ] Собрать musl libc как shared library
 
-### Memory
-- [x] `brk`
-- [x] `mmap` (anonymous, MAP_FIXED, MAP_ANON)
-- [ ] (WIP) `munmap` (unmaps but does not free physical pages)
-- [ ] (WIP) `mprotect` (no-op)
+### /dev/random, /dev/urandom
+- [ ] chr-dev использующий getrandom (P1)
 
-### Signals
-- [x] `rt_sigaction`
-- [x] `rt_sigprocmask`
-- [x] `rt_sigreturn`
-- [x] `kill` / `tkill` / `tgkill`
-- [x] Signal delivery frame (`rt_sigframe_t` on user stack)
-- [x] Default actions (fatal with core, ignore, stop/cont)
-- [ ] `sigaltstack` (no-op)
+### select / poll реальная блокировка
+- [ ] Сейчас всегда возвращает "готово" — ломает event loop программы
+- [ ] Нужно: список fd-ожиданий, разбудить на событии read/write-ready
 
-### Other
-- [x] `uname` (Linux-compatible fields)
-- [x] `arch_prctl` (ARCH_SET_FS/GS, ARCH_GET_FS/GS)
-- [x] `getrandom`
-- [x] `umask`
-- [ ] (WIP) `nanosleep` (no-op)
-- [ ] (WIP) `futex` (FUTEX_WAIT/WEAKE stubs, no blocking)
-- [ ] (WIP) `gettimeofday` / `clock_gettime` / `times` (return zero)
-- [ ] (WIP) `getrlimit` / `prlimit64` (return unlimited)
-- [ ] (WIP) `statfs` / `fstatfs` (return zeroed data)
-- [ ] (WIP) `select` / `pselect6` / `poll` / `ppoll` (no-op / always-ready)
-- [ ] `socket` / networking
+### Потоки (clone/pthread)
+- [ ] `clone()` syscall с флагами CLONE_VM / CLONE_FS / CLONE_FILES
+- [ ] TLS: каждый поток имеет свой FS base
+- [ ] `set_tid_address`, `exit_thread` (не exit_group)
+- [ ] Нужен для: любой программы использующей pthreads
 
-## Not in scope yet
+---
 
-- SMP / APIC
-- PCI / AHCI / NVMe
-- Networking
-- Dynamic linking
-- Full permission model / procfs
-- Arbitrary executable path (currently load from VFS only)
+## P3 — Постоянное хранилище и реальная ФС
+
+### Драйвер virtio-blk
+- [ ] PCI enumeration (поиск device 1af4:1001)
+- [ ] Virtio ring setup (virtqueue)
+- [ ] Чтение/запись секторов
+
+### Файловая система ext2
+- [ ] Парсинг суперблока, inodes, блоков
+- [ ] Монтирование как root или /mnt
+- [ ] Создание файлов, директорий, запись
+- [ ] Возможность устанавливать программы постоянно
+
+### Обновлённый VFS: mount table
+- [ ] vfs_mount(path, fs_type, device)
+- [ ] Поддержка нескольких ФС одновременно
+
+---
+
+## P4 — Сеть
+
+### virtio-net драйвер
+- [ ] Virtio NIC (device 1af4:1000)
+- [ ] Отправка/приём ethernet фреймов
+
+### Сетевой стек
+- [ ] ARP, IPv4, ICMP (ping)
+- [ ] UDP
+- [ ] TCP (state machine: SYN/ACK/FIN)
+
+### BSD сокеты
+- [ ] `socket()` / `bind()` / `connect()` / `send()` / `recv()`
+- [ ] AF_INET + SOCK_STREAM / SOCK_DGRAM
+- [ ] AF_UNIX (unix domain sockets — нужны для dbus, systemd-style IPC)
+
+---
+
+## P5 — Полноценная совместимость
+
+### APIC вместо PIC 8259
+- [ ] Local APIC: per-CPU timer (замена PIT)
+- [ ] I/O APIC: маршрутизация IRQ
+- [ ] Нужен для SMP (> 1 ядра)
+
+### SMP (мультипроцессорность)
+- [ ] AP startup (SIPI sequence)
+- [ ] Per-CPU структуры (GDT/IDT/TSS/планировщик)
+- [ ] Spinlock / RCU примитивы
+
+### Полная модель прав
+- [ ] uid/gid реально проверяются в VFS
+- [ ] `setuid` / `setgid` / capabilities
+- [ ] chroot
+
+### TTY/PTY
+- [ ] `/dev/ptmx` — мастер сторона псевдотерминала
+- [ ] `/dev/pts/N` — slave сторона
+- [ ] Нужен для: SSH, tmux, screen
+
+---
+
+## Порядок работы (рекомендуемый)
+
+```
+P0: VFS write → nanosleep → SIGPIPE
+P1: /proc → shebang → getrandom RDRAND → futex → mmap file-backed
+P2: динамический линкёр → clone/threads → poll блокировка
+P3: virtio-blk → ext2 → mount table
+P4: virtio-net → TCP/IP → сокеты
+P5: APIC → SMP → PTY → права
+```

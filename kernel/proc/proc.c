@@ -48,6 +48,8 @@ proc_t* proc_alloc(uint32_t ppid)
         }
 
         p->mmap_bump = 0x0000500000000000ULL;
+        p->cwd[0] = '/';
+        p->cwd[1] = '\0';
         return p;
     }
     return NULL;
@@ -61,7 +63,7 @@ proc_t* proc_find(uint32_t pid)
     return NULL;
 }
 
-static proc_t* find_ready_except(proc_t* skip)
+proc_t* proc_next_ready(proc_t* skip)
 {
     for (int i = 0; i < PROC_MAX; i++)
     {
@@ -76,7 +78,7 @@ static proc_t* find_ready_except(proc_t* skip)
 void sched_yield_blocking(void)
 {
     proc_t* p = g_current_proc;
-    proc_t* next = find_ready_except(p);
+    proc_t* next = proc_next_ready(p);
     if (!next)
         return;
 
