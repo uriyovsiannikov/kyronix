@@ -50,6 +50,7 @@ extern proc_t* g_current_proc;
 
 void proc_init(void);
 proc_t* proc_alloc(uint32_t ppid);
+void proc_kstack_free(proc_t* p);
 proc_t* proc_find(uint32_t pid);
 proc_t* proc_next_ready(proc_t* skip);
 void sched_switch(proc_t* next);
