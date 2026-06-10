@@ -69,40 +69,15 @@ ASM_SRCS := \
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o) $(ASM_SRCS:%.S=$(BUILD_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
-INIT_BIN := build/bin/kyronix-init
-KSHELL   := build/bin/ksh
-SBASE_BIN := build/bin/sbase-tools.stamp
 INITRD   := initrd.cpio
 
 .PHONY: all iso run run-serial run-uefi clean
 
-all: $(TARGET) $(INIT_BIN) $(KSHELL) $(SBASE_BIN)
+all: $(TARGET) $(INITRD)
 
-$(INIT_BIN):
-	$(MAKE) -C user/init_
-
-$(KSHELL):
-	$(MAKE) -C user/shell
-
-$(SBASE_BIN):
-	$(MAKE) -C user/sbase -f Makefile.kyronix
-	$(MAKE) -C user/fetch
-	touch $@
-
-$(INITRD): $(INIT_BIN) $(KSHELL) $(SBASE_BIN)
-	@rm -rf initrd_staging
-	@mkdir -p initrd_staging/etc initrd_staging/bin
-	@cp $(INIT_BIN) initrd_staging/init
-	@cp $(KSHELL) initrd_staging/bin/ksh
-	@printf "KyronixOS 0.0.1\n" > initrd_staging/etc/kyronix-release
-	@for f in build/bin/*; do \
-	    case "$$(basename $$f)" in \
-	        kyronix-init|ksh|sbase-tools.stamp) ;; \
-	        *) cp $$f initrd_staging/bin/ ;; \
-	    esac \
-	done
-	@cd initrd_staging && find . | sort | cpio -o --format=newc > ../$(INITRD) 2>/dev/null
-	@rm -rf initrd_staging
+$(INITRD):
+	$(MAKE) -C user
+	@cd rootfs && find . | sort | cpio -o --format=newc > ../$(INITRD) 2>/dev/null
 	@echo "  Built: $(INITRD)"
 
 $(TARGET): $(OBJS)
@@ -190,9 +165,6 @@ run-uefi: iso
 
 clean:
 	rm -f $(TARGET) $(ISO) $(INITRD)
-	rm -rf $(BUILD_DIR) iso_root initrd_staging
-	$(MAKE) -C user/init_ clean
-	$(MAKE) -C user/shell clean
-	-$(MAKE) -C user/sbase -f Makefile.kyronix clean 2>/dev/null
-	$(MAKE) -C user/fetch clean
+	rm -rf $(BUILD_DIR) iso_root rootfs/bin rootfs/init
+	$(MAKE) -C user clean
 	$(MAKE) -C $(LIMINE_DIR) clean 2>/dev/null; true
