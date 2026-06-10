@@ -163,6 +163,15 @@ run-uefi: iso
 	    -no-reboot                  \
 	    -no-shutdown
 
+fmt:
+	@echo "Formatting code..."
+	@find $(SRC_DIR) -type f \( -name "*.c" -o -name "*.h" \) -exec clang-format -i {} \;
+	@echo "Format complete"
+
+fmt-check:
+	@echo "Checking code style..."
+	@find $(SRC_DIR) -type f \( -name "*.c" -o -name "*.h" \) -exec clang-format --dry-
+
 clean:
 	rm -f $(TARGET) $(ISO) $(INITRD)
 	rm -rf $(BUILD_DIR) iso_root rootfs/bin

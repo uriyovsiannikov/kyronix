@@ -1,42 +1,48 @@
 #include "process.h"
+#include "arch/x86_64/syscall_setup.h"
 #include "elf.h"
+#include "fs/vfs.h"
+#include "lib/log.h"
+#include "lib/string.h"
+#include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
-#include "mm/heap.h"
-#include "lib/string.h"
-#include "lib/log.h"
-#include "arch/x86_64/syscall_setup.h"
-#include "fs/vfs.h"
 #include "proc/proc.h"
 #include "syscall/syscall.h"
 
-#define USER_STACK_PAGES  4
-#define USER_STACK_TOP    0x7fffffff0000ULL
-#define USER_STACK_BASE   (USER_STACK_TOP - (uint64_t)USER_STACK_PAGES * PAGE_SIZE)
+#define USER_STACK_PAGES 4
+#define USER_STACK_TOP 0x7fffffff0000ULL
+#define USER_STACK_BASE (USER_STACK_TOP - (uint64_t) USER_STACK_PAGES * PAGE_SIZE)
 
-static inline void *top_page_kva(uint64_t uva, uint64_t top_page_phys) {
+static inline void* top_page_kva(uint64_t uva, uint64_t top_page_phys)
+{
     uint64_t base = USER_STACK_TOP - PAGE_SIZE;
-    return (uint8_t *)phys_to_virt(top_page_phys) + (uva - base);
+    return (uint8_t*) phys_to_virt(top_page_phys) + (uva - base);
 }
 
-uint64_t setup_user_stack(vmm_space_t *space,
-                           const elf_load_result_t *elf,
-                           int argc,
-                           const char * const *argv,
-                           const char * const *envp) {
+uint64_t setup_user_stack(vmm_space_t* space, const elf_load_result_t* elf, int argc,
+                          const char* const* argv, const char* const* envp)
+{
     int envc = 0;
-    if (envp) while (envp[envc]) envc++;
+    if (envp)
+        while (envp[envc])
+            envc++;
 
     uint64_t phys[USER_STACK_PAGES];
-    for (int i = 0; i < USER_STACK_PAGES; i++) {
-        phys[i] = (uint64_t)pmm_alloc_zeroed();
-        if (!phys[i]) {
-            for (int j = 0; j < i; j++) pmm_free((void *)phys[j]);
+    for (int i = 0; i < USER_STACK_PAGES; i++)
+    {
+        phys[i] = (uint64_t) pmm_alloc_zeroed();
+        if (!phys[i])
+        {
+            for (int j = 0; j < i; j++)
+                pmm_free((void*) phys[j]);
             return 0;
         }
-        uint64_t va = USER_STACK_TOP - (uint64_t)(USER_STACK_PAGES - i) * PAGE_SIZE;
-        if (vmm_map(space, va, phys[i], VMM_UDATA) < 0) {
-            for (int j = 0; j <= i; j++) pmm_free((void *)phys[j]);
+        uint64_t va = USER_STACK_TOP - (uint64_t) (USER_STACK_PAGES - i) * PAGE_SIZE;
+        if (vmm_map(space, va, phys[i], VMM_UDATA) < 0)
+        {
+            for (int j = 0; j <= i; j++)
+                pmm_free((void*) phys[j]);
             return 0;
         }
     }
@@ -48,20 +54,23 @@ uint64_t setup_user_stack(vmm_space_t *space,
     uint64_t random_uva = sp;
 
     uint64_t env_uva[64] = {0};
-    for (int i = envc - 1; i >= 0; i--) {
-        uint64_t len = (uint64_t)strlen(envp[i]) + 1;
+    for (int i = envc - 1; i >= 0; i--)
+    {
+        uint64_t len = (uint64_t) strlen(envp[i]) + 1;
         sp -= len;
-        sp &= ~(uint64_t)7;
+        sp &= ~(uint64_t) 7;
         env_uva[i] = sp;
         memcpy(top_page_kva(sp, top_phys), envp[i], len);
     }
 
     uint64_t arg_uva[64] = {0};
-    for (int i = argc - 1; i >= 0; i--) {
-        if (!argv || !argv[i]) continue;
-        uint64_t len = (uint64_t)strlen(argv[i]) + 1;
+    for (int i = argc - 1; i >= 0; i--)
+    {
+        if (!argv || !argv[i])
+            continue;
+        uint64_t len = (uint64_t) strlen(argv[i]) + 1;
         sp -= len;
-        sp &= ~(uint64_t)7;
+        sp &= ~(uint64_t) 7;
         arg_uva[i] = sp;
         memcpy(top_page_kva(sp, top_phys), argv[i], len);
     }
@@ -77,63 +86,62 @@ uint64_t setup_user_stack(vmm_space_t *space,
         AT_NULL,   0,
     };
 
-    uint64_t frame_bytes = (uint64_t)(1 + argc + 1 + envc + 1) * 8 + sizeof(auxv);
+    uint64_t frame_bytes = (uint64_t) (1 + argc + 1 + envc + 1) * 8 + sizeof(auxv);
     sp -= frame_bytes;
-    sp &= ~(uint64_t)15;   /* 16-byte align */
+    sp &= ~(uint64_t) 15; /* 16-byte align */
 
-    uint64_t *p = top_page_kva(sp, top_phys);
-    *p++ = (uint64_t)argc;
-    for (int i = 0; i < argc; i++) *p++ = arg_uva[i];
+    uint64_t* p = top_page_kva(sp, top_phys);
+    *p++ = (uint64_t) argc;
+    for (int i = 0; i < argc; i++)
+        *p++ = arg_uva[i];
     *p++ = 0;
-    for (int i = 0; i < envc; i++) *p++ = env_uva[i];
+    for (int i = 0; i < envc; i++)
+        *p++ = env_uva[i];
     *p++ = 0;
     memcpy(p, auxv, sizeof(auxv));
 
     log_info("Stack: RSP=0x%lx  argc=%d  argv0=%s", sp, argc,
-            (argc > 0 && argv && argv[0]) ? argv[0] : "(null)");
+             (argc > 0 && argv && argv[0]) ? argv[0] : "(null)");
     return sp;
 }
 
-int process_exec(const void *data, uint64_t size, const char *name) {
+int process_exec(const void* data, uint64_t size, const char* name)
+{
     elf_load_result_t res;
-    if (elf_load(data, size, &res) < 0) {
+    if (elf_load(data, size, &res) < 0)
+    {
         log_error("process_exec: elf_load failed");
         return -1;
     }
 
-    const char *init_argv[] = { name, NULL };
-    const char *init_envp[] = {
-        "TERM=vt100",
-        "HOME=/",
-        "PATH=/:/bin:/usr/bin",
-        "SHELL=/init",
-        NULL
-    };
-    uint64_t rsp = setup_user_stack(res.space, &res, 1,
-                                     init_argv, init_envp);
-    if (!rsp) {
+    const char* init_argv[] = {name, NULL};
+    const char* init_envp[] = {"TERM=vt100", "HOME=/", "PATH=/:/bin:/usr/bin", "SHELL=/init", NULL};
+    uint64_t rsp = setup_user_stack(res.space, &res, 1, init_argv, init_envp);
+    if (!rsp)
+    {
         log_error("process_exec: stack setup failed");
         vmm_space_free(res.space);
         return -1;
     }
 
-    proc_t *p = proc_alloc(0);
-    if (!p) {
+    proc_t* p = proc_alloc(0);
+    if (!p)
+    {
         log_error("process_exec: proc_alloc failed");
         vmm_space_free(res.space);
         return -1;
     }
 
-    p->space     = res.space;
-    p->brk       = PAGE_ALIGN_UP(res.brk);
-    p->brk_base  = p->brk;
+    p->space = res.space;
+    p->brk = PAGE_ALIGN_UP(res.brk);
+    p->brk_base = p->brk;
     p->mmap_bump = 0x0000500000000000ULL;
-    p->state     = PROC_RUNNING;
+    p->state = PROC_RUNNING;
 
     vfs_copy_fdtable(p->fds, vfs_get_fdtable());
     vfs_set_fdtable(p->fds);
 
-    g_current_proc  = p;
+    g_current_proc = p;
     g_current_space = p->space;
     cpu_set_kernel_stack(p->kstack_top);
 
