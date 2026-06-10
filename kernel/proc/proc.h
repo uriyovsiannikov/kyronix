@@ -39,14 +39,10 @@ typedef struct proc
     k_sigaction_t sig_actions[NSIG];
     char cwd[512];
     uint64_t wakeup_tick;
-    uint64_t alarm_tick;
-    char exe_path[512];
+    uint32_t uid;
+    uint32_t gid;
+    bool is_thread;
     uint32_t* cleartid_addr;
-    uint8_t is_thread;
-    uint32_t uid,  gid;  /* real */
-    uint32_t euid, egid; /* effective */
-    uint32_t suid, sgid; /* saved-set */
-    uint64_t kstack_guard; /* VA of the unmapped guard page below kstack */
 } proc_t;
 
 extern proc_t g_proctable[PROC_MAX];

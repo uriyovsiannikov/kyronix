@@ -152,12 +152,7 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
     if (!p)
         return -(int64_t) EINVAL;
     for (uint64_t o = 0; o < PAGE_ALIGN_UP(len); o += PAGE_SIZE)
-    {
-        uint64_t phys = vmm_virt_to_phys(p->space, addr + o);
         vmm_unmap(p->space, addr + o);
-        if (phys)
-            pmm_free((void*) phys);
-    }
     return 0;
 }
 
@@ -207,7 +202,6 @@ static int64_t sys_fork(syscall_frame_t* f)
     child->uid = parent->uid; child->euid = parent->euid; child->suid = parent->suid;
     child->gid = parent->gid; child->egid = parent->egid; child->sgid = parent->sgid;
     memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
-    memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
 
     uint8_t* ksp = child->kstack + KSTACK_SIZE;
 
@@ -237,84 +231,6 @@ fail_space:
     return -(int64_t) ENOMEM;
 }
 
-#define CLONE_VM             0x00000100
-#define CLONE_SETTLS         0x00080000
-#define CLONE_PARENT_SETTID  0x00100000
-#define CLONE_CHILD_CLEARTID 0x00200000
-#define CLONE_CHILD_SETTID   0x01000000
-
-static int64_t sys_clone(uint64_t flags, uint64_t child_stack, uint32_t* ptid,
-                          uint32_t* ctid, uint64_t newtls, syscall_frame_t* f)
-{
-    proc_t* parent = cur();
-    if (!parent)
-        return -(int64_t) ENOMEM;
-
-    if (!(flags & CLONE_VM))
-        return sys_fork(f);
-
-    proc_t* child = proc_alloc(parent->pid);
-    if (!child)
-        return -(int64_t) ENOMEM;
-
-    child->space = parent->space; /* shared address space */
-    child->is_thread = 1;
-
-    vfs_copy_fdtable(child->fds, parent->fds);
-
-    child->brk        = parent->brk;
-    child->brk_base   = parent->brk_base;
-    child->mmap_bump  = parent->mmap_bump;
-    child->pgid       = parent->pgid;
-    child->sig_mask   = parent->sig_mask;
-    memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
-    child->pending_sigs = 0;
-    child->fs_base    = (flags & CLONE_SETTLS) ? newtls : parent->fs_base;
-    child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
-    child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
-    memcpy(child->cwd,      parent->cwd,      sizeof(child->cwd));
-    memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
-
-    if ((flags & CLONE_PARENT_SETTID) && ptid) *ptid = child->pid;
-    if ((flags & CLONE_CHILD_SETTID)  && ctid) *ctid = child->pid;
-    if (flags & CLONE_CHILD_CLEARTID) child->cleartid_addr = ctid;
-
-    uint8_t* ksp = child->kstack + KSTACK_SIZE;
-    ksp -= sizeof(syscall_frame_t);
-    syscall_frame_t* cf = (syscall_frame_t*) ksp;
-    *cf = *f;
-    cf->rax = 0;
-
-    child->user_rsp = child_stack ? child_stack : parent->user_rsp;
-
-    ksp -= 8;
-    *(uint64_t*) ksp = (uint64_t) (uintptr_t) proc_resume_frame;
-    ksp -= 6 * 8;
-    memset(ksp, 0, 6 * 8);
-    child->kstack_rsp = (uint64_t) ksp;
-    child->state = PROC_READY;
-
-    log_info("[clone] parent=%u child=%u flags=0x%lx", parent->pid, child->pid, flags);
-    return (int64_t) child->pid;
-}
-
-static void path_abs(char* out, const char* in)
-{
-    if (!in || in[0] == '/') {
-        strncpy(out, in ? in : "", 511);
-        out[511] = '\0';
-        return;
-    }
-    proc_t* p = cur();
-    const char* cwd = (p && p->cwd[0]) ? p->cwd : "/";
-    size_t cl = strlen(cwd);
-    if (cl >= 511) { out[0] = '/'; out[1] = '\0'; return; }
-    memcpy(out, cwd, cl);
-    if (out[cl - 1] != '/') out[cl++] = '/';
-    strncpy(out + cl, in, 511 - cl);
-    out[511] = '\0';
-}
-
 #define MAX_EXEC_ARGS 32
 
 static int64_t sys_execve(const char* path, const char** uargv, const char** uenvp)
@@ -322,60 +238,8 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
     if (!path)
         return -(int64_t) EFAULT;
 
-    char abs[512];
-    path_abs(abs, path);
-    const char* exec_path = abs[0] ? abs : path;
-
-    vfs_node_t* node = vfs_lookup(exec_path);
-    if (!node || node->type != VFS_TYPE_REG || !node->data)
-        return -(int64_t) ENOENT;
-
-    char shebang_interp[512] = {0};
-    char shebang_arg[256] = {0};
-    char script_path[512] = {0};
-    bool is_shebang = false;
-
-    if (node->size >= 2 && node->data[0] == '#' && node->data[1] == '!')
-    {
-        char line[256];
-        size_t ll = 0;
-        while (ll < 254 && 2 + ll < node->size)
-        {
-            char ch = (char) node->data[2 + ll];
-            if (ch == '\n' || ch == '\r')
-                break;
-            line[ll++] = ch;
-        }
-        line[ll] = '\0';
-        char* p2 = line;
-        while (*p2 == ' ' || *p2 == '\t')
-            p2++;
-        if (!*p2)
-            return -(int64_t) ENOEXEC;
-        char* istart = p2;
-        while (*p2 && *p2 != ' ' && *p2 != '\t')
-            p2++;
-        size_t ilen = (size_t) (p2 - istart);
-        if (!ilen || ilen >= sizeof(shebang_interp))
-            return -(int64_t) ENOEXEC;
-        memcpy(shebang_interp, istart, ilen);
-        while (*p2 == ' ' || *p2 == '\t')
-            p2++;
-        if (*p2)
-        {
-            strncpy(shebang_arg, p2, sizeof(shebang_arg) - 1);
-            char* e = shebang_arg + strlen(shebang_arg) - 1;
-            while (e >= shebang_arg && (*e == ' ' || *e == '\t' || *e == '\r'))
-                *e-- = '\0';
-        }
-        strncpy(script_path, exec_path, sizeof(script_path) - 1);
-        node = vfs_lookup(shebang_interp);
-        if (!node || node->type != VFS_TYPE_REG || !node->data)
-            return -(int64_t) ENOENT;
-        exec_path = shebang_interp;
-        is_shebang = true;
-    }
-
+    /* Copy argv/envp strings from user space to kernel heap BEFORE switching
+     * address spaces. The old user space stays mapped until vmm_switch.     */
     char* argv_mem[MAX_EXEC_ARGS] = {0};
     char* envp_mem[MAX_EXEC_ARGS] = {0};
     const char* kargv[MAX_EXEC_ARGS + 1];
@@ -400,59 +264,34 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
         }                                                                                          \
     } while (0)
 
-    if (is_shebang)
+    if (uargv)
     {
-        kargv[argc++] = shebang_interp;
-        if (shebang_arg[0])
-            kargv[argc++] = shebang_arg;
-        kargv[argc++] = script_path;
-        int ui = 1;
-        while (argc < MAX_EXEC_ARGS && uargv && uargv[ui])
+        while (argc < MAX_EXEC_ARGS && uargv[argc])
         {
-            size_t n = strlen(uargv[ui]) + 1;
+            size_t n = strlen(uargv[argc]) + 1;
             argv_mem[argc] = kmalloc(n);
             if (!argv_mem[argc])
             {
                 FREE_EXEC_STRS();
                 return -(int64_t) ENOMEM;
             }
-            memcpy(argv_mem[argc], uargv[ui], n);
+            memcpy(argv_mem[argc], uargv[argc], n);
             kargv[argc] = argv_mem[argc];
             argc++;
-            ui++;
         }
     }
-    else
+    if (argc == 0)
     {
-        if (uargv)
+        size_t n = strlen(path) + 1;
+        argv_mem[0] = kmalloc(n);
+        if (!argv_mem[0])
         {
-            while (argc < MAX_EXEC_ARGS && uargv[argc])
-            {
-                size_t n = strlen(uargv[argc]) + 1;
-                argv_mem[argc] = kmalloc(n);
-                if (!argv_mem[argc])
-                {
-                    FREE_EXEC_STRS();
-                    return -(int64_t) ENOMEM;
-                }
-                memcpy(argv_mem[argc], uargv[argc], n);
-                kargv[argc] = argv_mem[argc];
-                argc++;
-            }
+            FREE_EXEC_STRS();
+            return -(int64_t) ENOMEM;
         }
-        if (argc == 0)
-        {
-            size_t n = strlen(exec_path) + 1;
-            argv_mem[0] = kmalloc(n);
-            if (!argv_mem[0])
-            {
-                FREE_EXEC_STRS();
-                return -(int64_t) ENOMEM;
-            }
-            memcpy(argv_mem[0], exec_path, n);
-            kargv[0] = argv_mem[0];
-            argc = 1;
-        }
+        memcpy(argv_mem[0], path, n);
+        kargv[0] = argv_mem[0];
+        argc = 1;
     }
     kargv[argc] = NULL;
 
@@ -473,6 +312,13 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
         }
     }
     kenvp[envc] = NULL;
+
+    vfs_node_t* node = vfs_lookup(path);
+    if (!node || node->type != VFS_TYPE_REG || !node->data)
+    {
+        FREE_EXEC_STRS();
+        return -(int64_t) ENOENT;
+    }
 
     elf_load_result_t res;
     if (elf_load(node->data, node->size, &res) < 0)
@@ -497,8 +343,7 @@ static int64_t sys_execve(const char* path, const char** uargv, const char** uen
     p->space = res.space;
     p->brk = PAGE_ALIGN_UP(res.brk);
     p->brk_base = p->brk;
-    p->mmap_bump = 0x0000500000000000ULL + ((kern_rand64() & 0x1FFULL) << 21);
-    strncpy(p->exe_path, exec_path, sizeof(p->exe_path) - 1);
+    p->mmap_bump = 0x0000500000000000ULL;
     g_current_space = p->space;
 
     vmm_switch(p->space);
@@ -1097,6 +942,22 @@ static int64_t sys_nanosleep(void* r, void* m)
     p->wakeup_tick = 0;
     return 0;
 }
+static void path_abs(char* out, const char* in)
+{
+    if (!in || in[0] == '/') {
+        strncpy(out, in ? in : "", 511);
+        out[511] = '\0';
+        return;
+    }
+    proc_t* p = cur();
+    const char* cwd = (p && p->cwd[0]) ? p->cwd : "/";
+    size_t cl = strlen(cwd);
+    if (cl >= 511) { out[0] = '/'; out[1] = '\0'; return; }
+    memcpy(out, cwd, cl);
+    if (out[cl - 1] != '/') out[cl++] = '/';
+    strncpy(out + cl, in, 511 - cl);
+    out[511] = '\0';
+}
 
 static int64_t sys_mkdir(const char* path, uint32_t mode)
 {
@@ -1233,56 +1094,14 @@ static int64_t sys_futex(uint32_t* uaddr, int op, uint32_t val, void* timeout, u
     }
 }
 
-static int rdrand_supported(void)
-{
-    uint32_t ecx;
-    __asm__ volatile("cpuid" : "=c"(ecx) : "a"(1) : "ebx", "edx", "memory");
-    return (int) ((ecx >> 30) & 1);
-}
-
 static int64_t sys_getrandom(void* buf, uint64_t len, uint32_t flags)
 {
     (void) flags;
     if (!buf || !len)
         return 0;
-
-    static int rdrand_ok = -1;
-    if (rdrand_ok < 0)
-        rdrand_ok = rdrand_supported();
-
     uint8_t* p = (uint8_t*) buf;
-    uint64_t i = 0;
-
-    if (rdrand_ok)
-    {
-        while (i + 8 <= len)
-        {
-            uint64_t v;
-            __asm__ volatile("1: rdrand %0; jnc 1b" : "=r"(v) :: "cc");
-            __builtin_memcpy(p + i, &v, 8);
-            i += 8;
-        }
-        if (i < len)
-        {
-            uint64_t v;
-            __asm__ volatile("1: rdrand %0; jnc 1b" : "=r"(v) :: "cc");
-            __builtin_memcpy(p + i, &v, len - i);
-        }
-    }
-    else
-    {
-        /* TSC + g_ticks xorshift64 fallback */
-        uint32_t lo, hi;
-        __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        uint64_t seed = ((uint64_t) hi << 32 | lo) ^ g_ticks;
-        for (; i < len; i++)
-        {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            p[i] = (uint8_t) seed;
-        }
-    }
+    for (uint64_t i = 0; i < len; i++)
+        p[i] = (uint8_t) (0x53 ^ (i * 0x6b + 0x37));
     return (int64_t) len;
 }
 
@@ -1326,61 +1145,73 @@ struct pollfd_s
     short revents;
 };
 
-static int poll_check(struct pollfd_s* fds, uint64_t nfds)
-{
-    int ready = 0;
-    for (uint64_t i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-        if (fds[i].fd < 0) continue;
-        if (!fd_valid(fds[i].fd)) {
-            fds[i].revents = POLLNVAL;
-        } else {
-            if ((fds[i].events & POLLIN)  && fd_pollin(fds[i].fd))  fds[i].revents |= POLLIN;
-            if ((fds[i].events & POLLOUT) && fd_pollout(fds[i].fd)) fds[i].revents |= POLLOUT;
-        }
-        if (fds[i].revents) ready++;
-    }
-    return ready;
-}
-
 static int64_t sys_poll(struct pollfd_s* fds, uint64_t nfds, int timeout)
 {
-    if (!fds && nfds) return -(int64_t) EFAULT;
-    int ready = nfds ? poll_check(fds, nfds) : 0;
-    if (ready > 0 || timeout == 0) return ready;
-    proc_t* p = cur();
-    uint64_t deadline = (timeout > 0) ? g_ticks + (uint64_t) timeout : (uint64_t) -1ULL;
-    while (!ready) {
-        if (g_ticks >= deadline) break;
-        if (p && (p->pending_sigs & ~p->sig_mask)) return -(int64_t) EINTR;
-        if (proc_next_ready(p))
-            sched_yield_blocking();
-        else { sti(); hlt(); cli(); }
-        if (nfds) ready = poll_check(fds, nfds);
+    uint64_t iterations = 0;
+    uint64_t max_iterations = (timeout < 0) ? UINT64_MAX
+                            : (uint64_t) (timeout > 0 ? timeout : 0);
+
+    for (;;)
+    {
+        uint64_t ready = 0;
+        for (uint64_t i = 0; i < nfds; i++)
+        {
+            fds[i].revents = 0;
+
+            if (fds[i].events & POLLIN)
+            {
+                if (fds[i].fd < 0 || fd_pollin(fds[i].fd))
+                    fds[i].revents |= POLLIN;
+            }
+            if (fds[i].events & POLLOUT)
+            {
+                if (fds[i].fd < 0 || fd_pollout(fds[i].fd))
+                    fds[i].revents |= POLLOUT;
+            }
+
+            if (fds[i].revents)
+                ready++;
+        }
+
+        if (ready > 0)
+            return (int64_t) ready;
+
+        if (timeout == 0)
+            return 0;
+
+        iterations++;
+        if (iterations >= max_iterations)
+            return 0;
+
+        if (g_current_proc && (g_current_proc->pending_sigs & ~g_current_proc->sig_mask))
+            return -(int64_t) EINTR;
+
+        sched_yield_blocking();
+        cpu_relax();
     }
-    return (int64_t) ready;
 }
 
 static int64_t sys_ppoll(struct pollfd_s* fds, uint64_t nfds, void* tmo, const void* sigmask,
                          uint64_t sigsetsize)
 {
+    int timeout = -1;
+    if (tmo)
+    {
+        uint64_t* ts = (uint64_t*) tmo;
+        timeout = (int)(ts[0] * 1000 + ts[1] / 1000000);
+    }
     (void) sigmask;
     (void) sigsetsize;
-    int timeout = -1;
-    if (tmo) {
-        uint64_t ms = ((uint64_t*) tmo)[0] * 1000 + ((uint64_t*) tmo)[1] / 1000000;
-        timeout = ms > 0x7fffffff ? 0x7fffffff : (int) ms;
-    }
     return sys_poll(fds, nfds, timeout);
 }
 
-static inline bool fds_test(const uint8_t* set, int fd)
+static inline bool fds_test(uint8_t* set, int fd)
 {
-    return set && ((set[fd >> 3] >> (fd & 7)) & 1);
+    return set && (set[fd >> 3] & (1 << (fd & 7)));
 }
 static inline void fds_set(uint8_t* set, int fd)
 {
-    if (set) set[fd >> 3] |= (uint8_t) (1 << (fd & 7));
+    if (set) set[fd >> 3] |= (1 << (fd & 7));
 }
 
 static int64_t sys_select(int nfds, void* rfds, void* wfds, void* efds, void* timeout)
@@ -1914,6 +1745,82 @@ static int64_t sys_sysinfo(struct sysinfo_s* si)
     return 0;
 }
 
+#define CLONE_VM      0x00000100
+#define CLONE_THREAD  0x00010000
+
+static int64_t sys_clone(uint64_t flags, uint64_t rsp, uint32_t* parent_tid, uint32_t* child_tid,
+                         uint64_t tls, syscall_frame_t* f)
+{
+    proc_t* parent = cur();
+    if (!parent)
+        return -(int64_t) ENOMEM;
+
+    proc_t* child = proc_alloc(parent->pid);
+    if (!child)
+        return -(int64_t) ENOMEM;
+
+    if (flags & CLONE_VM)
+    {
+        child->space = parent->space;
+    }
+    else
+    {
+        child->space = vmm_space_new();
+        if (!child->space) goto fail_space;
+        if (vmm_fork_user(child->space, parent->space) < 0) goto fail_fork;
+    }
+
+    vfs_copy_fdtable(child->fds, parent->fds);
+    child->brk = parent->brk;
+    child->brk_base = parent->brk_base;
+    child->mmap_bump = parent->mmap_bump;
+    child->pgid = parent->pgid;
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+    child->sig_mask = parent->sig_mask;
+    memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
+    child->pending_sigs = 0;
+    child->fs_base = parent->fs_base;
+    child->is_thread = (flags & CLONE_THREAD) ? true : false;
+    memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+
+    uint8_t* ksp = child->kstack + KSTACK_SIZE;
+
+    ksp -= sizeof(syscall_frame_t);
+    syscall_frame_t* cf = (syscall_frame_t*) ksp;
+    *cf = *f;
+    cf->rax = 0;
+    if (rsp)
+        child->user_rsp = rsp;
+    else
+        child->user_rsp = parent->user_rsp;
+
+    ksp -= 8;
+    *(uint64_t*) ksp = (uint64_t) (uintptr_t) proc_resume_frame;
+
+    ksp -= 6 * 8;
+    memset(ksp, 0, 6 * 8);
+
+    if (tls && (flags & CLONE_VM))
+        child->fs_base = tls;
+    if (parent_tid) *parent_tid = 0;
+    if (child_tid) *child_tid = child->pid;
+
+    child->kstack_rsp = (uint64_t) ksp;
+    child->state = PROC_READY;
+
+    log_info("[clone] parent=%u child=%u flags=0x%lx", parent->pid, child->pid, flags);
+    return (int64_t) child->pid;
+
+fail_fork:
+    vmm_space_free(child->space);
+fail_space:
+    kfree(child->kstack);
+    kfree(child->fds);
+    child->state = PROC_UNUSED;
+    return -(int64_t) ENOMEM;
+}
+
 void syscall_dispatch(syscall_frame_t* f)
 {
     uint64_t nr = f->rax;
@@ -2089,7 +1996,7 @@ void syscall_dispatch(syscall_frame_t* f)
         ret = fd_valid((int)a1) ? 0 : -(int64_t)EBADF;
         break;
     case 74: case 75:
-        ret = fd_valid((int)a1) ? 0 : -(int64_t)EBADF;
+        ret = fd_valid((int)a1) ? 0 : -(int64_t)EBADF;што какта 
         break;
     case 76:
         ret = sys_truncate((const char*) a1, a2);
@@ -2232,7 +2139,7 @@ void syscall_dispatch(syscall_frame_t* f)
     case 127: { if (a1) *(uint64_t*)a1 = cur() ? (cur()->pending_sigs & cur()->sig_mask) : 0; ret = 0; break; }
     case 128: ret = sys_rt_sigtimedwait((const uint64_t*)a1, (void*)a2, (const void*)a3, a4); break;
     case 129: ret = 0; break; /* rt_sigqueueinfo */
-    case 132: ret = 0; break; /* utime: no-op */
+    case 132: ret = 0; break; /* utime: no-op */ conflicts
     case 130:
         ret = sys_rt_sigsuspend((const uint64_t*) a1, a2);
         break;
