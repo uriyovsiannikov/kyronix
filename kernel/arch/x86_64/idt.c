@@ -133,11 +133,11 @@ void isr_dispatch(cpu_state_t* state)
                 8,8,4,5,4,8,4,8,8,8,8,5,4,11,8,8,7,8,5,8,8,8,8,8,8,8,8,8,8,8,8,8
             };
             int sig = (n < 32) ? exc_sig[n] : 11;
-            kprintf("\n[exc#%lu pid=%u RIP=%lx] → sig %d\n",
-                    n, g_current_proc->pid, state->rip, sig);
+            kdbg("\n[exc#%lu pid=%u RIP=%lx] -> sig %d\n",
+                 n, g_current_proc->pid, state->rip, sig);
             if (n == 14) {
                 uint64_t cr2 = read_cr2();
-                kprintf("  CR2=%lx err=%lx\n", cr2, state->error_code);
+                kdbg("  CR2=%lx err=%lx\n", cr2, state->error_code);
             }
             proc_do_exit(-sig);
         }

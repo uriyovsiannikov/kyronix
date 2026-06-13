@@ -9,8 +9,18 @@ static void log_putchar(char c, void* ctx)
     serial_putchar(COM1, c);
 }
 
-void klog_printf(const char* fmt, ...)
+static int g_klog_level = KLOG_WARN;
+
+void klog_set_level(int level)
 {
+    g_klog_level = level;
+}
+
+void klog_printf(int level, const char* fmt, ...)
+{
+    if (level > g_klog_level)
+        return;
+
     va_list ap;
     va_start(ap, fmt);
     vprintf_cb(log_putchar, NULL, fmt, ap);
