@@ -10,14 +10,6 @@
 #include "proc/jail.h"
 #include "proc/proc.h"
 
-/*
- * Phantom forks deliberately retain the original PID.  Replacing the address
- * space with a COW copy is the important boundary: observers and the attacker
- * see uninterrupted execution, while subsequent writes cannot affect the
- * pre-trigger reality.  The process is then moved into a full jail and all
- * external effects are served by persona providers below.
- */
-
 static uint32_t phantom_seed(const proc_t *p, const char *purpose) {
     uint32_t h = 2166136261u ^ p->pid ^ ((uint32_t) p->phantom_generation << 16);
     for (const unsigned char *s = (const unsigned char *) purpose; s && *s; s++) {
@@ -82,13 +74,13 @@ bool phantom_intercept_fault(struct proc *raw, cpu_state_t *raw_state, uint64_t 
         uint64_t page = address & ~(PAGE_SIZE - 1);
         void *decoy = pmm_alloc_zeroed();
         if (!decoy) return false;
-        /* A read/write decoy page lets the probe continue without exposing data. */
+        // a r/w decoy page lets the probe continue without exposing data
         if (vmm_map(p->space, page, (uint64_t) decoy, VMM_UDATA) == 0) return true;
         pmm_free(decoy);
         return false;
     }
 
-    /* Non-memory probes are consumed as a one-byte honeypot instruction. */
+    // non-memory probes are consumed as a one-byte honeypot instruction
     state->rip++;
     return true;
 }
