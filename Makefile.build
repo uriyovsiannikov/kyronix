@@ -101,6 +101,7 @@ SRCS := \
     kernel/exec/process.c              \
     kernel/proc/proc.c                 \
     kernel/proc/jail.c                 \
+    kernel/proc/phantom.c              \
     kernel/proc/signal.c               \
     kernel/proc/smp.c                  \
     kernel/fs/ext2.c                   \

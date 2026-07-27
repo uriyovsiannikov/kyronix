@@ -82,6 +82,13 @@ typedef struct proc {
     uint8_t stop_reported; /* this stop was already handed back via wait4(WUNTRACED) */
     uint8_t job_stopped;   /* loop condition for proc_job_stop(); state alone can't be used since
                             * sched_yield_blocking() unconditionally resets state to PROC_WAITING */
+
+    /* Phantom-fork containment state.  Kept at the tail to preserve sched.S offsets. */
+    uint8_t phantom_active;
+    uint8_t phantom_reason;
+    uint16_t phantom_generation;
+    uint64_t phantom_events;
+    uint64_t phantom_last_address;
 } proc_t;
 
 extern proc_t g_proctable[PROC_MAX] __attribute__((aligned(16)));

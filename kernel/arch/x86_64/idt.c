@@ -12,6 +12,7 @@
 #include "net/net.h"
 #include "pic.h"
 #include "pit.h"
+#include "proc/phantom.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
 #include "proc/smp.h"
@@ -202,7 +203,12 @@ void isr_dispatch(cpu_state_t *state) {
             if (n == 14) {
                 page_fault_result_t pf = handle_user_page_fault(state);
                 if (pf == PF_HANDLED) return;
+                if (phantom_intercept_fault(g_current_proc, state, read_cr2())) return;
                 sig = (pf == PF_SIGBUS) ? SIGBUS : SIGSEGV;
+            }
+
+            if (n == 6 || n == 13 || n == 30) {
+                if (phantom_intercept_fault(g_current_proc, state, state->rip)) return;
             }
 
             if ((n == 1 || n == 3) && g_current_proc->tracer_pid) {

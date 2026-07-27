@@ -3,6 +3,7 @@
 #include "fs/pipe.h"
 #include "fs/vfs.h"
 #include "lib/string.h"
+#include "proc/phantom.h"
 #include "proc/proc.h"
 #include "syscall/syscall.h"
 
@@ -73,6 +74,7 @@ static void fill_peer_cred(vfs_file_t *f, struct ucred_s *cr) {
 static uint64_t align8(uint64_t v) { return (v + 7) & ~7ULL; }
 
 int64_t sys_socket_connect(int fd, struct sockaddr_un *addr, uint64_t addrlen) {
+    if (phantom_fake_connect(g_current_proc, fd, addr, addrlen)) return 0;
     (void) addrlen;
     if (!addr) return -(int64_t) EFAULT;
     if (!uptr_ok(addr, sizeof(*addr))) return -(int64_t) EFAULT;
